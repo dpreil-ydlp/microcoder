@@ -1,0 +1,112 @@
+models:
+  - id: gemma3:1b
+    role: interface
+    provider: ollama
+    state_policy: hot
+    hardware_min_ram_gb: 8
+    context_limit: 32768
+
+  - id: liquid-lfm2-1.2b
+    role: interface
+    provider: llamacpp
+    state_policy: warm
+    hardware_min_ram_gb: 16
+    context_limit: 32768
+
+  - id: smollm2:360m
+    role: spec_critic
+    provider: ollama
+    state_policy: hot
+    hardware_min_ram_gb: 8
+    context_limit: 8192
+
+  - id: gemma3:1b
+    role: spec_critic
+    provider: ollama
+    state_policy: hot
+    hardware_min_ram_gb: 8
+    context_limit: 32768
+
+  - id: gemma3:1b
+    role: planner
+    provider: ollama
+    state_policy: hot
+    hardware_min_ram_gb: 8
+    context_limit: 32768
+
+  - id: gemma3:1b
+    role: reviewer
+    provider: ollama
+    state_policy: hot
+    hardware_min_ram_gb: 8
+    context_limit: 32768
+
+  - id: qwen2.5-coder:3b
+    role: code_writer
+    provider: ollama
+    state_policy: warm
+    hardware_min_ram_gb: 16
+    context_limit: 32768
+
+  - id: qwen2.5-coder:7b
+    role: code_writer
+    provider: ollama
+    state_policy: warm
+    hardware_min_ram_gb: 24
+    context_limit: 32768
+
+  - id: qwen2.5-coder:7b
+    role: test_writer
+    provider: ollama
+    state_policy: warm
+    hardware_min_ram_gb: 24
+    context_limit: 32768
+
+  - id: phi4-mini
+    role: test_writer
+    provider: ollama
+    state_policy: cold
+    hardware_min_ram_gb: 24
+    context_limit: 32768
+
+  - id: phi4-mini
+    role: reviewer
+    provider: ollama
+    state_policy: cold
+    hardware_min_ram_gb: 24
+    context_limit: 32768
+
+  - id: moondream
+    role: visual_inspector
+    provider: ollama
+    state_policy: cold
+    hardware_min_ram_gb: 32
+    context_limit: 8192
+
+role_policy:
+  constrained_16gb:
+    interface: gemma3:1b
+    spec_critic: smollm2:360m
+    planner: gemma3:1b
+    code_writer: qwen2.5-coder:3b
+    test_writer: qwen2.5-coder:7b
+    reviewer: gemma3:1b
+    visual_inspector: disabled
+
+  middle_32gb:
+    interface: gemma3:1b
+    spec_critic: gemma3:1b
+    planner: gemma3:1b
+    code_writer: qwen2.5-coder:7b
+    test_writer: phi4-mini
+    reviewer: gemma3:1b
+    visual_inspector: disabled_by_default
+
+  strong_local_64gb:
+    interface: gemma3:1b
+    spec_critic: gemma3:1b
+    planner: gemma3:1b
+    code_writer: qwen2.5-coder:7b
+    test_writer: qwen2.5-coder:7b
+    reviewer: phi4-mini
+    visual_inspector: moondream

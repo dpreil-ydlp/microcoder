@@ -1,0 +1,80 @@
+project:
+  name: micro-mission-coder
+  mission_dir: .mission
+  database_path: .mission/mmc.sqlite
+
+hardware:
+  profile: middle_32gb
+  max_ram_gb: 32
+  max_vram_gb: 8
+  max_parallel_model_calls: 1
+  max_parallel_test_jobs: 1
+  context_budget_tokens: 8192
+  battery_saver: false
+
+repo_brain:
+  enabled: true
+  require_fresh_index: true
+  tree_sitter: true
+  lsp: false
+  ripgrep_internal: true
+  refresh_on_patch: true
+
+context:
+  no_global_tool_catalog: true
+  default_code_patch_budget_tokens: 4096
+  default_planner_budget_tokens: 1800
+  include_evidence_ids: true
+
+models:
+  provider_default: ollama
+  registry_path: ./12_MODEL_PROFILES.yaml
+  unload_cold_after_seconds: 30
+  keep_warm_for_seconds: 300
+
+harness:
+  use_worktrees: true
+  patch_only: true
+  command_timeout_seconds: 120
+  allow_dependency_install: false
+  allowed_commands:
+    - pnpm typecheck
+    - pnpm lint
+    - pnpm test
+    - npm test
+    - pytest
+
+verification:
+  targeted_tests_first: true
+  full_tests_on_high_confidence_only: false
+  playwright_enabled: true
+  playwright_targeted_only: true
+
+vision:
+  enabled: false
+  cold_load_only: true
+
+evaluation:
+  trace_all_model_calls: true
+  store_artifacts: true
+  baseline_raw_model: qwen2.5-coder-7b-q4
+
+design:
+  open_design:
+    enabled: optional
+    mode_by_hardware:
+      "16gb": reference_only
+      "24_32gb": reference_or_small_prototype
+      "48_64gb": prototype_and_critique
+    max_selected_skills: 3
+    max_design_tokens: 1500
+    use_mcp_hot_path: false
+  shadcn_ui:
+    enabled: true
+    policy: prefer_existing_repo_components_first
+  chatcn:
+    enabled: optional
+    use_only_for_surfaces:
+      - chat
+      - agent_conversation
+      - messaging

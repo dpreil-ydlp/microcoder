@@ -1,0 +1,51 @@
+{
+  "name": "micro-mission-coder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "12_MODEL_PROFILES.yaml",
+    "README.md",
+    "bin/",
+    "dist/",
+    "micro_mission_coder_specs/07_SCHEMAS/",
+    "tools/"
+  ],
+  "bin": {
+    "microcoder": "./bin/microcoder.js",
+    "mmc": "./bin/mmc.js"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "lint": "node scripts/check-static.mjs",
+    "test": "vitest run",
+    "test:unit": "vitest run test/runtime.test.ts -t \"validates all authoritative schema fixtures|help shows the single-word launcher|tui command parser|phase packets carry docs context|phase packets carry web research|patch harness|compiles markdown acceptance criteria|config validation rejects bad llama.cpp|config validation rejects bad web research\"",
+    "test:contract": "vitest run test/runtime.test.ts -t \"missing config uses defaults|invalid config errors are reported once|chat reset clears|model routing honors|models list reports|models list falls back|models list shows llama.cpp|doctor reports MISSING_MODEL|web search uses|setup web configures|command verifier|verification plan|internal API handlers|eval export and validate|eval chat-lab|eval build-lab\"",
+    "test:integration": "vitest run test/runtime.test.ts -t \"tui snapshot renders|tui command mode executes|mmc init creates|chat collects an app brief|chat handles a simple Snake game|repo brain detects|repo brain ignores|setup backend llamacpp|models probe code_writer uses a llama.cpp|auto-started llama.cpp|run --task applies|run --task exits nonzero|run --mission rejects invalid|run --task rejects|verification failure prevents|eval benchmark exports|eval benchmark rejects invalid|mission resume selects\"",
+    "test:e2e": "npm run build && node scripts/e2e-web-tui.mjs",
+    "test:smoke": "npm run build && node scripts/smoke-launcher.mjs",
+    "test:uat": "npm run build && node scripts/uat-conversation-gauntlet.mjs && node bin/microcoder.js eval build-lab",
+    "test:uat:cli": "npm run build && node scripts/uat-conversation-gauntlet.mjs --cli-only",
+    "test:uat:browser": "npm run build && node scripts/uat-conversation-gauntlet.mjs --browser-only",
+    "test:uat:launcher": "npm run build && node scripts/uat-launcher-flow.mjs",
+    "chat:lab": "npm run build && node bin/microcoder.js eval chat-lab",
+    "build:lab": "npm run build && node bin/microcoder.js eval build-lab",
+    "test:regression": "vitest run test/runtime.test.ts -t \"help shows the single-word launcher|tui command parser maps build commands|chat collects an app brief|chat handles a simple Snake game|chat handles a todo list|chat replaces stale vague collecting state|eval chat-lab|eval build-lab|does not recompile|shows the compiled spec|build it|invalid config errors are reported once|async CLI failures|doctor reports MISSING_MODEL|models probe code_writer uses a llama.cpp|auto-started llama.cpp|run --task exits nonzero|run --mission rejects invalid|eval benchmark rejects invalid|run --task rejects out-of-scope|verification failure prevents|command verifier blocks|patch harness rejects|patch harness unwraps incomplete\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "mmc": "tsx src/cli/mmc.ts"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "playwright": "^1.60.0",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

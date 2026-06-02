@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Attempt",
+  "type": "object",
+  "required": [
+    "attempt_id",
+    "task_id",
+    "started_at",
+    "status"
+  ],
+  "properties": {
+    "attempt_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "ended_at": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "started",
+        "patch_generated",
+        "applied",
+        "verified",
+        "failed",
+        "reverted",
+        "accepted"
+      ]
+    },
+    "patch_path": {
+      "type": "string"
+    },
+    "verification_results": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence_score": {
+      "type": "number"
+    }
+  }
+}

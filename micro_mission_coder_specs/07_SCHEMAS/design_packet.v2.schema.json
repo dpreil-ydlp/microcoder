@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://micro-mission-coder.local/schemas/design_packet.v2.schema.json",
+  "title": "DesignPacketV2",
+  "type": "object",
+  "required": [
+    "packet_version",
+    "task_id",
+    "ui_surface",
+    "primary_design_source",
+    "component_library",
+    "tokens",
+    "allowed_components",
+    "required_states",
+    "viewports",
+    "accessibility_rules",
+    "verification_questions"
+  ],
+  "properties": {
+    "packet_version": {
+      "const": "design-packet-v2"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "ui_surface": {
+      "type": "string"
+    },
+    "primary_design_source": {
+      "enum": [
+        "existing_repo",
+        "shadcn_ui",
+        "chatcn",
+        "open_design",
+        "user_reference"
+      ]
+    },
+    "component_library": {
+      "type": "string"
+    },
+    "open_design": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "selected_system": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 3
+        },
+        "selected_template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brief_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "tokens": {
+      "type": "object"
+    },
+    "allowed_components": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "forbidden_components": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_states": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "viewports": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "accessibility_rules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "interaction_rules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "visual_references": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "anti_patterns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification_questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

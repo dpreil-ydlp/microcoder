@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HardwareProfile",
+  "type": "object",
+  "required": [
+    "name",
+    "ram_gb",
+    "parallel_model_calls",
+    "context_budget_tokens"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "ram_gb": {
+      "type": "number"
+    },
+    "vram_gb": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "ssd_gb": {
+      "type": "number"
+    },
+    "parallel_model_calls": {
+      "type": "integer"
+    },
+    "parallel_test_jobs": {
+      "type": "integer"
+    },
+    "context_budget_tokens": {
+      "type": "integer"
+    },
+    "vision_enabled": {
+      "type": "boolean"
+    },
+    "playwright_enabled": {
+      "type": "boolean"
+    }
+  }
+}

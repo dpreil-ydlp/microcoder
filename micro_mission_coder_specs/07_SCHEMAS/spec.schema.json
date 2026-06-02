@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CompiledSpec",
+  "type": "object",
+  "required": [
+    "spec_id",
+    "goal",
+    "requirements",
+    "acceptance_criteria",
+    "non_goals",
+    "risk_flags"
+  ],
+  "properties": {
+    "spec_id": {
+      "type": "string"
+    },
+    "goal": {
+      "type": "string"
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/requirement"
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/acceptance"
+      }
+    },
+    "ui_states": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "security_constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "data_model_changes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "requirement": {
+      "type": "object",
+      "required": [
+        "id",
+        "text"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "required": [
+        "id",
+        "text",
+        "verification"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "verification": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

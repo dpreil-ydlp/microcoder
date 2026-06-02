@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvidencePacket",
+  "type": "object",
+  "required": [
+    "packet_id",
+    "task_id",
+    "repo_sha",
+    "index_sha",
+    "freshness",
+    "items"
+  ],
+  "properties": {
+    "packet_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "repo_sha": {
+      "type": "string"
+    },
+    "index_sha": {
+      "type": "string"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "freshness": {
+      "const": "fresh"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceItem"
+      }
+    }
+  },
+  "$defs": {
+    "evidenceItem": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "summary",
+        "source"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "source_snippet",
+            "symbol",
+            "test",
+            "diagnostic",
+            "doc",
+            "design",
+            "attempt",
+            "git"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "rank": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

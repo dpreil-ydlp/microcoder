@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.mission/
+.gauntlet/
+gauntlet-report.md
+.micro-mission-coder.yaml
+.DS_Store
+__pycache__/
+*.pyc

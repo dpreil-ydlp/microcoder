@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ModelRegistry",
+  "type": "object",
+  "required": [
+    "models"
+  ],
+  "properties": {
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "role",
+          "provider",
+          "state_policy"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "context_limit": {
+            "type": "integer"
+          },
+          "state_policy": {
+            "enum": [
+              "hot",
+              "warm",
+              "cold",
+              "remote"
+            ]
+          },
+          "hardware_min_ram_gb": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  }
+}

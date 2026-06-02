@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mission",
+  "type": "object",
+  "required": [
+    "mission_id",
+    "goal",
+    "status",
+    "created_at",
+    "current_task_id"
+  ],
+  "properties": {
+    "mission_id": {
+      "type": "string"
+    },
+    "goal": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "active",
+        "blocked",
+        "complete",
+        "failed"
+      ]
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "current_task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "decision_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
