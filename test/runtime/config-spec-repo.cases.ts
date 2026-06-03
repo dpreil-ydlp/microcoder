@@ -50,7 +50,13 @@ it("mmc init creates config, mission directory, and idempotent SQLite schema", a
     const cwd = tempWorkspace();
     const cap = capture();
     expect(await runCli(["init"], { cwd, io: cap.io })).toBe(0);
-    expect(fs.existsSync(path.join(cwd, ".micro-mission-coder.yaml"))).toBe(true);
+    const configFile = path.join(cwd, ".micro-mission-coder.yaml");
+    expect(fs.existsSync(configFile)).toBe(true);
+    const configText = fs.readFileSync(configFile, "utf8");
+    expect(configText).toContain("# Model routing cheat sheet");
+    expect(configText).toContain("#     interface: liquid-lfm2-1.2b");
+    expect(configText).toContain("#   qwen2.5-coder:7b");
+    expect(configText).toContain("#       interface: /path/to/Models/LiquidAI/LFM2-1.2B-GGUF/LFM2-1.2B-Q4_K_M.gguf");
     expect(fs.existsSync(path.join(cwd, ".mission"))).toBe(true);
     expect(fs.existsSync(path.join(cwd, ".mission", "mmc.sqlite"))).toBe(true);
 
@@ -58,6 +64,20 @@ it("mmc init creates config, mission directory, and idempotent SQLite schema", a
     initializeDatabase(cwd, loaded.config);
     initializeDatabase(cwd, loaded.config);
     expect(fs.statSync(databasePath(cwd, loaded.config)).size).toBeGreaterThan(0);
+  });
+
+it("saveConfig keeps the commented model cheat sheet", async () => {
+    const cwd = tempWorkspace();
+    await runCli(["init"], { cwd, io: capture().io });
+    const loaded = loadConfig(cwd);
+    loaded.config.models.role_overrides = { interface: "liquid-lfm2-1.2b" };
+    saveConfig(cwd, loaded.config);
+
+    const configText = fs.readFileSync(path.join(cwd, ".micro-mission-coder.yaml"), "utf8");
+    expect(configText).toContain("role_overrides:");
+    expect(configText).toContain("interface: liquid-lfm2-1.2b");
+    expect(configText).toContain("# Model routing cheat sheet");
+    expect(configText).toContain("# Available model ids by role:");
   });
 
 it("missing config uses defaults and invalid config reports errors", () => {
@@ -109,6 +129,23 @@ it("mission start refuses a spec with missing acceptance criteria", async () => 
     const code = await runCli(["mission", "start"], { cwd, io: cap.io });
     expect(code).toBe(2);
     expect(cap.stdout.join("\n")).toContain("blocked_by_spec_ambiguity");
+  });
+
+it("chat reset preserves blocked compiled specs so the build can still report ambiguity", async () => {
+    const cwd = tempWorkspace();
+    await runCli(["init"], { cwd, io: capture().io });
+    await runCli(["spec", "create", "make the dashboard better"], { cwd, io: capture().io });
+    expect(await runCli(["mission", "start"], { cwd, io: capture().io })).toBe(2);
+    expect(fs.existsSync(path.join(cwd, ".mission", "spec.json"))).toBe(true);
+
+    const reset = capture();
+    expect(await runCli(["chat", "reset"], { cwd, io: reset.io })).toBe(0);
+    expect(fs.existsSync(path.join(cwd, ".mission", "spec.json"))).toBe(true);
+
+    const start = capture();
+    expect(await runCli(["build", "start"], { cwd, io: start.io })).toBe(2);
+    expect(start.stdout.join("\n")).toContain("blocked_by_spec_ambiguity");
+    expect(start.stderr.join("\n")).not.toContain("compiled spec not found");
   });
 
 it("valid JSON spec produces an acyclic task graph and starts a build", async () => {

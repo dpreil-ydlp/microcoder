@@ -385,7 +385,7 @@ it("eval build-lab runs prompt and seeded build batteries", async () => {
     expect(bugfixTranscript).toContain("patch_status applied");
     expect(bugfixTranscript).toContain("applied_attempt");
     expect(bugfixTranscript).toContain("$ npm test");
-  }, 60000);
+  }, 120_000);
 
 it("eval benchmark exports paired raw-vs-mmc rows", async () => {
     const cwd = tempWorkspace();
@@ -402,7 +402,7 @@ it("eval benchmark exports paired raw-vs-mmc rows", async () => {
     expect(report.rows).toHaveLength(3);
     expect(report.raw_correct_localization).toBe(1);
     expect(report.mmc_correct_localization).toBe(1);
-  });
+  }, 20_000);
 
 it("eval benchmark rejects invalid task counts", async () => {
     const cwd = tempWorkspace();

@@ -312,7 +312,7 @@ function inferVerification(text: string): string {
 function inferRiskFlags(text: string): string[] {
   const flags: string[] = [];
   if (/\b(auth|permission|login|session)\b/i.test(text)) flags.push("auth");
-  if (/\b(payment|invoice|billing|money|card)\b/i.test(text)) flags.push("billing");
+  if (/\b(payment|invoice|billing|money|credit card|debit card|card payments?)\b/i.test(text)) flags.push("billing");
   if (/\b(schema|migration|database|db)\b/i.test(text)) flags.push("schema");
   if (/\b(secret|token|password|credential|pii)\b/i.test(text)) flags.push("sensitive_data");
   if (/\b(frontend|ui|screen|page|component|dashboard|form|chat)\b/i.test(text)) flags.push("frontend");

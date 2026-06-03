@@ -16,6 +16,7 @@ import {
   type IntentAnalysis,
   type BriefPatch,
 } from "./intent.js";
+import { analyzeWithInterfaceModel, hasExplicitInterfaceRoute, type InterfaceModelPatch } from "./interface-analysis.js";
 
 export type SpecChatStatus = "collecting" | "compiled";
 
@@ -115,7 +116,7 @@ export async function handleSpecChatTurn(cwd: string, config: MmcConfig, userTex
       draft_spec_path: specChatDraftPath(cwd, config),
     };
   }
-  mergeUserTextIntoBrief(state, trimmed);
+  const interfacePatch = await mergeUserTextIntoBrief(cwd, config, state, trimmed);
   await refreshStandardContext(config, state, trimmed);
 
   const compile = maybeCompileChatSpec(cwd, config, state);
@@ -129,7 +130,7 @@ export async function handleSpecChatTurn(cwd: string, config: MmcConfig, userTex
     state.pending_questions = nextQuestions(state.brief);
   }
 
-  const assistant_text = compile ? compiledReply(compile.result, state) : collectingReply(state);
+  const assistant_text = withInterfaceReply(interfacePatch?.reply, compile ? compiledReply(compile.result, state) : collectingReply(state));
   state.messages.push({ role: "assistant", content: assistant_text, created_at: new Date().toISOString() });
   state.updated_at = new Date().toISOString();
   persistDraft(cwd, config, state);
@@ -232,10 +233,13 @@ function persistDraft(cwd: string, config: MmcConfig, state: SpecChatState): voi
   fs.writeFileSync(file, buildSpecMarkdown(state), "utf8");
 }
 
-function mergeUserTextIntoBrief(state: SpecChatState, text: string): void {
+async function mergeUserTextIntoBrief(cwd: string, config: MmcConfig, state: SpecChatState, text: string): Promise<InterfaceModelPatch | null> {
   const hadBriefBeforeTurn = hasBuildBrief(state.brief);
   const intent = analyzeIntent(text);
   const willApplyIntent = (!hadBriefBeforeTurn || isExplicitIntentRequest(text, intent)) && shouldApplyIntentAnalysis(text, intent);
+  const shouldAskInterface = !willApplyIntent || hasExplicitInterfaceRoute(config);
+  const interfacePatch = shouldAskInterface ? await analyzeWithInterfaceModel({ cwd, config, brief: state.brief, userText: text }) : null;
+  const willApplyInterface = Boolean(interfacePatch);
   state.brief.notes = unique([...state.brief.notes, text]);
   if (state.pending_questions.length === 1) {
     assignAnswer(state.brief, state.pending_questions[0].id, text);
@@ -245,11 +249,14 @@ function mergeUserTextIntoBrief(state: SpecChatState, text: string): void {
   if (mentionsData(text)) state.brief.data = unique([...state.brief.data, ...splitList(text)]);
   if (mentionsAcceptance(text)) state.brief.acceptance = unique([...state.brief.acceptance, ...splitList(text)]);
   if (mentionsConstraint(text)) state.brief.constraints = unique([...state.brief.constraints, ...splitList(text)]);
-  if (mentionsWorkflow(text) && !willApplyIntent) state.brief.workflows = unique([...state.brief.workflows, ...splitList(text)]);
-  if (willApplyIntent) {
+  if (mentionsWorkflow(text) && !willApplyIntent && !willApplyInterface) state.brief.workflows = unique([...state.brief.workflows, ...splitList(text)]);
+  if (interfacePatch) {
+    applyInterfacePatch(state.brief, interfacePatch, !hadBriefBeforeTurn);
+  } else if (willApplyIntent) {
     applyIntentPatch(state.brief, buildBriefPatch(text, intent), intent);
   }
   refreshBriefRiskState(state.brief);
+  return interfacePatch;
 }
 
 function assignAnswer(brief: SpecChatBrief, id: SpecChatQuestion["id"], text: string): void {
@@ -273,7 +280,19 @@ function applyIntentPatch(brief: SpecChatBrief, patch: BriefPatch, analysis: Int
   brief.unresolved_risks = unique([...(brief.unresolved_risks ?? []), ...patch.unresolved_risks]) as RiskGate[];
 }
 
+function applyInterfacePatch(brief: SpecChatBrief, patch: InterfaceModelPatch, replaceGoal: boolean): void {
+  if (patch.goal && (replaceGoal || !brief.goal)) brief.goal = patch.goal;
+  if (patch.users && !brief.users) brief.users = patch.users;
+  brief.workflows = unique([...brief.workflows, ...patch.workflows]);
+  brief.acceptance = unique([...brief.acceptance, ...patch.acceptance]);
+  brief.data = unique([...brief.data, ...patch.data]);
+  brief.constraints = unique([...brief.constraints, ...patch.constraints]);
+  brief.risk_flags = unique([...(brief.risk_flags ?? []), ...patch.risk_flags]);
+  brief.unresolved_risks = unique([...(brief.unresolved_risks ?? []), ...patch.unresolved_risks]) as RiskGate[];
+}
+
 function shouldReplaceGoalWithPatch(currentGoal: string, analysis: IntentAnalysis): boolean {
+  if (analysis.redirect_request) return true;
   if (analysis.bare_known_request) return true;
   if (analysis.slots.modifiers.length || analysis.slots.workflow_requirements.length || analysis.slots.personas.length) return false;
   return currentGoal.trim().split(/\s+/).length <= 6;
@@ -373,6 +392,11 @@ function compiledReply(result: CompileResult, state: SpecChatState): string {
   lines.push(`I broke it into ${result.task_graph.tasks.length} build steps.`);
   lines.push("Next: say `build it` or run `/build start`.");
   return lines.join("\n");
+}
+
+function withInterfaceReply(reply: string | undefined, fallback: string): string {
+  if (!reply) return fallback;
+  return `${reply}\n${fallback}`;
 }
 
 function compiledFollowUpReply(): string {

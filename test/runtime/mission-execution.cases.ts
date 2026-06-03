@@ -212,6 +212,7 @@ it("run --task rejects out-of-scope model patches through the CLI", async () => 
     const cap = capture();
     expect(await runCli(["run", "--task", "T1", "--mock-patch", "bad.patch"], { cwd, io: cap.io })).toBe(5);
     expect(cap.stdout.join("\n")).toContain("patch_status failed_scope");
+    expect(cap.stdout.join("\n")).toContain("verification skipped patch touches file outside allowed scope: src/other.ts");
     expect(fs.readFileSync(path.join(cwd, ".mission", "attempts.jsonl"), "utf8")).toContain('"status":"failed"');
   });
 

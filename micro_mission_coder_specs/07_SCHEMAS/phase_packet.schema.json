@@ -14,6 +14,7 @@
     "phase": {
       "enum": [
         "spec_critic",
+        "interface",
         "planner",
         "code_patch",
         "test_writer",

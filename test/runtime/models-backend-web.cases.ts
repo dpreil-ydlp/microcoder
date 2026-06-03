@@ -199,6 +199,24 @@ it("setup backend llamacpp writes config without stealing Ollama as the default"
     expect(cap.stdout.join("\n")).toContain("select_hint microcoder setup backend llamacpp --select");
   });
 
+it("setup backend llamacpp pins liquid as the interface route when given an interface GGUF", async () => {
+    const cwd = tempWorkspace();
+    const modelPath = path.join(cwd, "interface.gguf");
+    fs.writeFileSync(modelPath, "fake gguf placeholder\n");
+    const cap = capture();
+    expect(
+      await runCli(["setup", "backend", "llamacpp", "--model", `interface=${modelPath}`, "--auto-start", "false"], {
+        cwd,
+        io: cap.io,
+      }),
+    ).toBe(0);
+    const loaded = loadConfig(cwd);
+    expect(loaded.config.models.provider_default).toBe("ollama");
+    expect(loaded.config.models.llamacpp.model_paths.interface).toBe(modelPath);
+    expect(loaded.config.models.role_overrides?.interface).toBe("liquid-lfm2-1.2b");
+    expect(cap.stdout.join("\n")).toContain("interface_route liquid-lfm2-1.2b");
+  });
+
 it("setup backend llamacpp rejects missing flag values before writing bad config", async () => {
     const cwd = tempWorkspace();
     const cap = capture();
@@ -232,6 +250,19 @@ it("config validation rejects bad web research settings", () => {
     expect(errors).toContain("web_research.timeout_seconds must be a positive integer");
     expect(errors).toContain("web_research.max_results must be a positive integer");
     expect(errors).toContain("web_research.search_url must be an http(s) URL");
+  });
+
+it("config validation rejects bad chat interface model settings", () => {
+    const loaded = loadConfig(tempWorkspace());
+    (loaded.config.chat.interface_model as { enabled: unknown }).enabled = "yes";
+    (loaded.config.chat.interface_model as { require_explicit_route: unknown }).require_explicit_route = "yes";
+    loaded.config.chat.interface_model.timeout_seconds = 0;
+    loaded.config.chat.interface_model.minimum_confidence = 2;
+    const errors = validateConfig(loaded.config);
+    expect(errors).toContain("chat.interface_model.enabled must be a boolean");
+    expect(errors).toContain("chat.interface_model.require_explicit_route must be a boolean");
+    expect(errors).toContain("chat.interface_model.timeout_seconds must be a positive integer");
+    expect(errors).toContain("chat.interface_model.minimum_confidence must be between 0 and 1");
   });
 
 it("web search uses a configured endpoint and returns sources without live network dependency", async () => {

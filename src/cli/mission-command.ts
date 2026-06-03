@@ -10,9 +10,11 @@ import {
   appendAttemptJsonl,
   getNextTask,
   loadTaskGraph,
+  markMissionComplete,
   saveTaskGraph,
 } from "../core/mission/ledger.js";
-import { generateFromModel } from "../core/models/orchestrator.js";
+import { effectiveModelProvider } from "../core/models/llamacpp-backend.js";
+import { generateFromModel, loadModelRegistry, routeModel } from "../core/models/orchestrator.js";
 import { buildEvidencePacket, getRepoStatus, refreshIfStale } from "../core/repo/brain.js";
 import { ensureMissionStructure, initializeDatabase } from "../core/storage/sqlite.js";
 import { appendEvent } from "../core/trace/events.js";
@@ -77,8 +79,15 @@ export async function runTaskCommand(cwd: string, io: CliIO, args: string[], loa
     },
   });
   const mockPatch = mockPatchFile ? fs.readFileSync(path.resolve(cwd, mockPatchFile), "utf8") : undefined;
-  io.stdout(`build_progress generating_patch task_id=${task.id}`);
-  const generated = await generateFromModel({ cwd, config: loaded.config, role: "code_writer", packet, mockResponse: mockPatch });
+  const route = describeGenerationRoute(cwd, loaded.config, "code_writer");
+  io.stdout(`build_progress generating_patch task_id=${task.id} model=${route.modelId} provider=${route.provider} timeout_seconds=${route.timeoutSeconds}`);
+  const generated = await withGenerationHeartbeat(
+    io,
+    task.id,
+    route.timeoutSeconds,
+    generateFromModel({ cwd, config: loaded.config, role: "code_writer", packet, mockResponse: mockPatch }),
+  );
+  io.stdout(`build_progress generated_patch task_id=${task.id} model=${generated.model_id} provider=${generated.provider} latency_ms=${generated.latency_ms}`);
   appendEvent(cwd, loaded.config, {
     task_id: task.id,
     event_type: "model_generate_completed",
@@ -147,11 +156,39 @@ export async function runTaskCommand(cwd: string, io: CliIO, args: string[], loa
   io.stdout(`attempt_id ${attempt.attempt_id}`);
   io.stdout(`patch_status ${patch.status}`);
   io.stdout(`worktree_mode ${patch.worktree_mode}`);
-  io.stdout(`verification ${verification.passed ? "passed" : "failed"} ${verification.summary}`);
+  if (patch.status === "applied") {
+    io.stdout(`verification ${verification.passed ? "passed" : "failed"} ${verification.summary}`);
+  } else {
+    io.stdout(`verification skipped ${verification.summary}`);
+  }
   io.stdout(`confidence ${confidence.score} ${confidence.decision}`);
   if (confidence.decision !== "accept") io.stdout(`task_not_accepted ${confidence.decision}`);
   if (escalation.action !== "continue") io.stdout(`escalation ${escalation.action}: ${escalation.reason}`);
   return confidence.decision === "accept" ? 0 : 5;
+}
+
+function describeGenerationRoute(cwd: string, config: LoadedConfig["config"], role: string): { modelId: string; provider: string; timeoutSeconds: number } {
+  const registry = loadModelRegistry(cwd, config);
+  const model = routeModel(registry, role, config.hardware.profile, config.models.role_overrides);
+  return {
+    modelId: model?.id ?? "none",
+    provider: model ? effectiveModelProvider(config, model) : "none",
+    timeoutSeconds: config.models.llamacpp.timeout_seconds,
+  };
+}
+
+async function withGenerationHeartbeat<T>(io: CliIO, taskId: string, timeoutSeconds: number, promise: Promise<T>): Promise<T> {
+  let elapsed = 0;
+  const heartbeatSeconds = Math.max(1, Math.min(10, Math.floor(timeoutSeconds / 6)));
+  const timer = setInterval(() => {
+    elapsed += heartbeatSeconds;
+    io.stdout(`build_progress generating_patch_wait task_id=${taskId} elapsed_seconds=${elapsed} timeout_seconds=${timeoutSeconds}`);
+  }, heartbeatSeconds * 1000);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 export async function runMissionCommand(
@@ -172,6 +209,12 @@ export async function runMissionCommand(
   while (ran < maxTasks) {
     const task = getNextTask(cwd, loaded.config);
     if (!task) {
+      const graph = loadTaskGraph(cwd, loaded.config);
+      if (graph.tasks.length > 0 && graph.tasks.every((candidate) => candidate.status === "complete")) {
+        markMissionComplete(cwd, loaded.config);
+        io.stdout(`${label}_complete completed_tasks=${ran}`);
+        return 0;
+      }
       io.stdout(ran === 0 ? `${label}_blocked_or_complete no_runnable_task` : `${label}_stopped completed_tasks=${ran}`);
       return ran === 0 ? 2 : 0;
     }

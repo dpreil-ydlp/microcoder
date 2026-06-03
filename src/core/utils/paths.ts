@@ -30,3 +30,11 @@ export function resolveFromCwd(cwd: string, maybeRelative: string): string {
 export function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
 }
+
+export function normalizeComparableText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}

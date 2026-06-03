@@ -7,6 +7,7 @@ import type { WebResearchPacket } from "../web/research.js";
 
 export type Phase =
   | "spec_critic"
+  | "interface"
   | "planner"
   | "code_patch"
   | "test_writer"
@@ -100,6 +101,8 @@ function allowedActions(phase: Phase): string[] {
       return ["approve", "veto", "needs_more_verification"];
     case "bug_analysis":
       return ["propose_hypotheses", "request_more_evidence", "escalate"];
+    case "interface":
+      return ["emit_json", "ask_user", "block"];
     default:
       return ["emit_json", "ask_user", "block"];
   }

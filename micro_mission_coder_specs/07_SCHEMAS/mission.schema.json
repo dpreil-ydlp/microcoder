@@ -22,7 +22,8 @@
         "active",
         "blocked",
         "complete",
-        "failed"
+        "failed",
+        "archived"
       ]
     },
     "created_at": {

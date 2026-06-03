@@ -219,13 +219,8 @@ export function applyPatchInWorktree(args: {
   }
 
   const worktree_mode = createIsolatedWorkspace(args.cwd, worktree_path, args.config);
-  const result = spawnSync("patch", ["-p1", "--forward"], {
-    cwd: worktree_path,
-    input: patchText,
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 10,
-  });
-  if (result.status !== 0) {
+  const preflight = runPatchCommand(worktree_path, patchText, true);
+  if (preflight.status !== 0) {
     return {
       attempt_id,
       status: "failed_apply",
@@ -233,10 +228,47 @@ export function applyPatchInWorktree(args: {
       patch_path,
       validation,
       worktree_mode,
-      stderr: result.stderr || result.stdout,
+      stderr: formatPatchCommandFailure("patch preflight failed", preflight),
+    };
+  }
+  const result = runPatchCommand(worktree_path, patchText, false);
+  if (result.status !== 0) {
+    resetFailedPatchWorkspace(args.cwd, worktree_path, worktree_mode);
+    return {
+      attempt_id,
+      status: "failed_apply",
+      worktree_path,
+      patch_path,
+      validation,
+      worktree_mode,
+      stderr: formatPatchCommandFailure("patch apply failed", result),
     };
   }
   return { attempt_id, status: "applied", worktree_path, patch_path, validation, worktree_mode };
+}
+
+function runPatchCommand(worktreePath: string, patchText: string, dryRun: boolean): ReturnType<typeof spawnSync> {
+  return spawnSync("patch", ["-p1", "--forward", ...(dryRun ? ["--dry-run"] : [])], {
+    cwd: worktreePath,
+    input: patchText,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 10,
+  });
+}
+
+function formatPatchCommandFailure(prefix: string, result: ReturnType<typeof spawnSync>): string {
+  const detail = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+  return detail ? `${prefix}\n${detail}` : prefix;
+}
+
+function resetFailedPatchWorkspace(source: string, worktreePath: string, mode: "git_worktree" | "directory_copy"): void {
+  if (mode === "git_worktree") {
+    spawnSync("git", ["reset", "--hard", "HEAD"], { cwd: worktreePath, encoding: "utf8" });
+    spawnSync("git", ["clean", "-fd"], { cwd: worktreePath, encoding: "utf8" });
+    return;
+  }
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  copyWorkspace(source, worktreePath);
 }
 
 function extractReplacementFile(output: string): string {

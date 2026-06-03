@@ -40,6 +40,7 @@ export function runSetupBackendLlamacppCommand(cwd: string, io: CliIO, args: str
   const loaded = loadValidConfig(cwd);
   const serverPath = valueAfter(args, "--server");
   if (serverPath) loaded.config.models.llamacpp.llama_server_path = serverPath;
+  const modelPathAssignments: string[] = [];
   for (const assignment of valuesAfter(args, "--model")) {
     const [key, ...pathParts] = assignment.split("=");
     const modelPath = pathParts.join("=");
@@ -48,6 +49,7 @@ export function runSetupBackendLlamacppCommand(cwd: string, io: CliIO, args: str
       return 1;
     }
     loaded.config.models.llamacpp.model_paths[key] = modelPath;
+    modelPathAssignments.push(key);
   }
   const host = valueAfter(args, "--host");
   if (host) loaded.config.models.llamacpp.host = host;
@@ -85,6 +87,12 @@ export function runSetupBackendLlamacppCommand(cwd: string, io: CliIO, args: str
   }
   if (providerDefault) loaded.config.models.provider_default = providerDefault;
   if (args.includes("--select")) loaded.config.models.provider_default = "llamacpp";
+  if (modelPathAssignments.includes("interface")) {
+    const registry = loadModelRegistry(cwd, loaded.config);
+    if (registry.models.some((model) => model.role === "interface" && model.id === "liquid-lfm2-1.2b")) {
+      loaded.config.models.role_overrides = { ...(loaded.config.models.role_overrides ?? {}), interface: "liquid-lfm2-1.2b" };
+    }
+  }
 
   saveConfig(cwd, loaded.config);
   io.stdout("backend llamacpp configured");
@@ -101,6 +109,7 @@ export function runSetupBackendLlamacppCommand(cwd: string, io: CliIO, args: str
   io.stdout(`auto_stop_after_request ${loaded.config.models.llamacpp.auto_stop_after_request}`);
   io.stdout(`allow_provider_fallback ${loaded.config.models.allow_provider_fallback}`);
   io.stdout(`model_paths ${JSON.stringify(loaded.config.models.llamacpp.model_paths)}`);
+  if (loaded.config.models.role_overrides?.interface === "liquid-lfm2-1.2b") io.stdout("interface_route liquid-lfm2-1.2b");
   if (loaded.config.models.provider_default !== "llamacpp") io.stdout("select_hint microcoder setup backend llamacpp --select");
   return 0;
 }

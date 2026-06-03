@@ -156,6 +156,10 @@ function readJson(cwd, relativePath) {
   return JSON.parse(fs.readFileSync(path.join(cwd, relativePath), "utf8"));
 }
 
+function writeJson(cwd, relativePath, value) {
+  fs.writeFileSync(path.join(cwd, relativePath), `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
 async function caseRun(name, fn) {
   const caseId = `${String(++caseCounter).padStart(2, "0")}-${slug(name)}`;
   const cwd = makeWorkspace(caseId);
@@ -218,6 +222,199 @@ async function startFakeSearchServer() {
   };
 }
 
+async function startFakeChatCompletionsServer(responseText, options = {}) {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/health" || request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "ok", data: [] }));
+      return;
+    }
+    if (request.url === "/v1/chat/completions" && request.method === "POST") {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        requests.push(body);
+        const content = typeof responseText === "function" ? responseText(body) : responseText;
+        setTimeout(() => {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ choices: [{ message: { content } }] }));
+        }, options.delayMs ?? 0);
+      });
+      return;
+    }
+    response.writeHead(404);
+    response.end("not found");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    port: server.address().port,
+    requests,
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  };
+}
+
+async function startFakePatchServer(options = {}) {
+  return startFakeChatCompletionsServer([
+    "diff --git a/README.md b/README.md",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/README.md",
+    "@@ -0,0 +1,2 @@",
+    "+# Snake",
+    "+Local browser game scaffold.",
+    "",
+  ].join("\n"), options);
+}
+
+async function configureFakeCodeWriter(cwd, options = {}) {
+  fs.writeFileSync(path.join(cwd, "model.gguf"), "fake model placeholder\n");
+  const fake = await startFakePatchServer(options);
+  const setup = runMicrocoder(cwd, [
+    "setup",
+    "backend",
+    "llamacpp",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(fake.port),
+    "--model",
+    "code_writer=model.gguf",
+    "--select",
+    "--auto-start",
+    "false",
+    "--timeout",
+    "2",
+  ]);
+  if (setup.status !== 0) {
+    await fake.close();
+    throw new Error(`fake code writer setup failed\n${setup.output}`);
+  }
+  return fake;
+}
+
+async function configureFakeInterfaceModel(cwd) {
+  fs.writeFileSync(path.join(cwd, "interface.gguf"), "fake interface model placeholder\n");
+  const fake = await startFakeChatCompletionsServer(JSON.stringify({
+    kind: "build_request",
+    confidence: 0.91,
+    reply: "I can shape that into a local grant-review app.",
+    goal: "Build a grant application reviewer for nonprofits",
+    users: "Nonprofit grant reviewers",
+    workflows: [
+      "Create grant applications with applicant, amount, and requested program",
+      "Score applications against review criteria",
+      "Filter applications by review status",
+    ],
+    data: ["Local grant applications with applicant, amount, score, and review status"],
+    acceptance: ["The browser app can add, score, and filter grant applications, and npm test passes"],
+    constraints: ["No accounts, backend, or cloud sync unless requested"],
+    risk_flags: ["frontend"],
+    unresolved_risks: [],
+  }));
+  const setup = runMicrocoder(cwd, [
+    "setup",
+    "backend",
+    "llamacpp",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(fake.port),
+    "--model",
+    "interface=interface.gguf",
+    "--auto-start",
+    "false",
+    "--timeout",
+    "2",
+  ]);
+  const route = runMicrocoder(cwd, ["models", "set", "interface", "liquid-lfm2-1.2b"]);
+  if (setup.status !== 0 || route.status !== 0) {
+    await fake.close();
+    throw new Error(`fake interface setup failed\n${setup.output}\n${route.output}`);
+  }
+  return fake;
+}
+
+async function configureFakeInterfaceAndCodeWriter(cwd, interfaceResponseText) {
+  fs.writeFileSync(path.join(cwd, "model.gguf"), "fake code model placeholder\n");
+  fs.writeFileSync(path.join(cwd, "interface.gguf"), "fake interface model placeholder\n");
+  const codePatch = [
+    "diff --git a/README.md b/README.md",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/README.md",
+    "@@ -0,0 +1,2 @@",
+    "+# Snake",
+    "+Local browser game scaffold.",
+    "",
+  ].join("\n");
+  const fake = await startFakeChatCompletionsServer((requestBody) => {
+    if (requestBody.includes("COMPILED_PLAN_CONTROL") || requestBody.includes("compiled_plan_control")) {
+      return interfaceResponseText;
+    }
+    return codePatch;
+  });
+  const setup = runMicrocoder(cwd, [
+    "setup",
+    "backend",
+    "llamacpp",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(fake.port),
+    "--model",
+    "code_writer=model.gguf",
+    "--model",
+    "interface=interface.gguf",
+    "--select",
+    "--auto-start",
+    "false",
+    "--timeout",
+    "2",
+  ]);
+  const route = runMicrocoder(cwd, ["models", "set", "interface", "liquid-lfm2-1.2b"]);
+  if (setup.status !== 0 || route.status !== 0) {
+    await fake.close();
+    throw new Error(`fake interface/code writer setup failed\n${setup.output}\n${route.output}`);
+  }
+  return fake;
+}
+
+function shrinkCompiledSpecToOneTask(cwd) {
+  const specPath = path.join(cwd, ".mission", "spec.json");
+  const result = readJson(cwd, ".mission/spec.json");
+  const first = result.task_graph.tasks[0];
+  result.task_graph.tasks = [
+    {
+      ...first,
+      status: "ready",
+      depends_on: [],
+      allowed_files: ["README.md"],
+      verification_commands: ["npm test"],
+    },
+  ];
+  fs.writeFileSync(specPath, `${JSON.stringify(result, null, 2)}\n`);
+}
+
+function shrinkActiveTaskGraphToOneTask(cwd) {
+  const graphPath = path.join(cwd, ".mission", "task_graph.json");
+  const graph = readJson(cwd, ".mission/task_graph.json");
+  const first = graph.tasks[0];
+  graph.tasks = [
+    {
+      ...first,
+      status: "ready",
+      depends_on: [],
+      allowed_files: ["README.md"],
+      verification_commands: ["npm test"],
+    },
+  ];
+  fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`);
+}
+
 function processIsAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -252,6 +449,15 @@ await caseRun("greeting stays short and stateless", (cwd) => {
   if (fs.existsSync(path.join(cwd, ".mission", "chat", "spec-chat.json"))) throw new Error("greeting created chat state");
 });
 
+await caseRun("plain launcher startup stays conversational", (cwd) => {
+  const result = runMicrocoder(cwd, []);
+  assertStatus("plain launcher", result, 0);
+  assertIncludes(result.stdout, "Hey. What do you want to build?", "plain launcher");
+  assertNotIncludes(result.stdout, "Microcoder Build Console", "plain launcher");
+  assertNotIncludes(result.stdout, "Routes", "plain launcher");
+  assertNotIncludes(result.stdout, "Commands:", "plain launcher");
+});
+
 await caseRun("capability answer is conversational and stateless", (cwd) => {
   const result = runTui(cwd, "what can you do?");
   assertStatus("capability", result, 0);
@@ -259,6 +465,46 @@ await caseRun("capability answer is conversational and stateless", (cwd) => {
   assertNotIncludes(result.stdout, "spec_id", "capability");
   assertNotIncludes(result.stdout, "chat_status", "capability");
   if (fs.existsSync(path.join(cwd, ".mission", "chat", "spec-chat.json"))) throw new Error("capability created chat state");
+});
+
+await caseRun("common meta questions are conversational and stateless", (cwd) => {
+  for (const prompt of [
+    "what is this?",
+    "what's microcoder?",
+    "how do I use you?",
+    "what does this do?",
+    "what can you help with?",
+    "who are you?",
+    "are you a chatbot?",
+    "what can you do for me?",
+    "help me",
+    "what is this tool?",
+  ]) {
+    const result = runTui(cwd, prompt);
+    assertStatus(`meta ${prompt}`, result, 0);
+    assertIncludes(result.stdout, "Tell me what you want to build in plain English", `meta ${prompt}`);
+    assertNotIncludes(result.stdout, "What are we building", `meta ${prompt}`);
+  }
+  if (fs.existsSync(path.join(cwd, ".mission", "chat", "spec-chat.json"))) throw new Error("meta question created chat state");
+});
+
+await caseRun("meta question does not contaminate the next compiled spec", (cwd) => {
+  assertStatus("meta", runTui(cwd, "what can you help with?"), 0);
+  if (fs.existsSync(path.join(cwd, ".mission", "chat", "spec-chat.json"))) throw new Error("meta question created chat state");
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  const spec = fs.readFileSync(path.join(cwd, ".mission", "spec.json"), "utf8");
+  assertIncludes(spec, "Build a browser Snake game", "meta contamination spec");
+  assertNotIncludes(spec, "what can you help with", "meta contamination spec");
+});
+
+await caseRun("idea requests offer starter projects", (cwd) => {
+  for (const prompt of ["I don't know", "got any ideas?", "what should I build?", "surprise me"]) {
+    const result = runTui(cwd, prompt);
+    assertStatus(`idea ${prompt}`, result, 0);
+    assertIncludes(result.stdout, "Try one of these:", `idea ${prompt}`);
+    assertNotIncludes(result.stdout, "What are we building", `idea ${prompt}`);
+  }
+  if (fs.existsSync(path.join(cwd, ".mission", "chat", "spec-chat.json"))) throw new Error("idea request created chat state");
 });
 
 await caseRun("confused input before brief asks for the build", (cwd) => {
@@ -270,6 +516,30 @@ await caseRun("confused input before brief asks for the build", (cwd) => {
   }
 });
 
+await caseRun("short approval before a plan asks for the build", (cwd) => {
+  const result = runTui(cwd, "go");
+  assertStatus("approval before plan", result, 0);
+  assertIncludes(result.stdout, "I don't have a build plan yet. What do you want to build?", "approval before plan");
+  assertNotIncludes(result.stdout, "Starting build from the compiled spec.", "approval before plan");
+  if (fs.existsSync(path.join(cwd, ".mission", "spec.json"))) throw new Error("approval before plan compiled a spec");
+});
+
+await caseRun("build-start language before a plan does not create a fake brief", (cwd) => {
+  const result = runTui(cwd, "build it");
+  assertStatus("build it before plan", result, 0);
+  assertIncludes(result.stdout, "I don't have a build plan yet. What do you want to build?", "build it before plan");
+  assertNotIncludes(result.stdout, "I have a build plan.", "build it before plan");
+  if (fs.existsSync(path.join(cwd, ".mission", "spec.json"))) throw new Error("build it before plan compiled a spec");
+});
+
+await caseRun("stop before any build stays stateless", (cwd) => {
+  const result = runTui(cwd, "stop");
+  assertStatus("empty stop", result, 0);
+  assertIncludes(result.stdout, "Nothing is building right now. What do you want to build?", "empty stop");
+  assertNotIncludes(result.stdout, "I need a little more before I can build it well.", "empty stop");
+  if (fs.existsSync(path.join(cwd, ".mission", "chat", "spec-chat.json"))) throw new Error("empty stop created chat state");
+});
+
 await caseRun("vague dashboard request asks focused follow-up questions", (cwd) => {
   const result = runTui(cwd, "make the dashboard better");
   assertStatus("vague dashboard", result, 0);
@@ -277,6 +547,16 @@ await caseRun("vague dashboard request asks focused follow-up questions", (cwd) 
   assertIncludes(result.stdout, "What proves it is done?", "vague dashboard");
   assertNotIncludes(result.stdout, "I have a build plan.", "vague dashboard");
   if (fs.existsSync(path.join(cwd, ".mission", "spec.json"))) throw new Error("vague dashboard compiled a spec");
+});
+
+await caseRun("partial brief launcher startup stays conversational", (cwd) => {
+  assertStatus("vague dashboard", runTui(cwd, "make the dashboard better"), 0);
+  const result = runMicrocoder(cwd, []);
+  assertStatus("partial brief launcher", result, 0);
+  assertIncludes(result.stdout, "We're shaping: make the dashboard better", "partial brief launcher");
+  assertIncludes(result.stdout, "Which exact user-visible behavior should change?", "partial brief launcher");
+  assertNotIncludes(result.stdout, "Microcoder Build Console", "partial brief launcher");
+  assertNotIncludes(result.stdout, "Routes", "partial brief launcher");
 });
 
 await caseRun("generic app request does not pretend it has enough detail", (cwd) => {
@@ -301,6 +581,137 @@ await caseRun("todo list request compiles with sane defaults", (cwd) => {
   assertIncludes(spec, "Todo items stored locally", "todo list spec");
 });
 
+await caseRun("start over resets a compiled brief without an active build", (cwd) => {
+  assertStatus("compile todo", runTui(cwd, "build me a todo list"), 0);
+  const result = runTui(cwd, "let's start over.");
+  assertStatus("start over compiled brief", result, 0);
+  assertIncludes(result.stdout, "Okay. Starting fresh.", "start over compiled brief");
+  assertIncludes(result.stdout, "What do you want to build?", "start over compiled brief");
+  assertNotIncludes(result.stdout, "I already have the build plan.", "start over compiled brief");
+  const state = readJson(cwd, ".mission/chat/spec-chat.json");
+  if (state.status !== "collecting") throw new Error(`start over left status ${state.status}`);
+  if (state.brief.goal) throw new Error(`start over left goal ${state.brief.goal}`);
+  if (fs.existsSync(path.join(cwd, ".mission", "spec.json"))) throw new Error("start over left stale spec.json");
+  const staleStart = runMicrocoder(cwd, ["build", "start"]);
+  if (staleStart.status === 0) throw new Error(`start over allowed stale build start\n${staleStart.output}`);
+  assertIncludes(staleStart.stderr, "compiled spec not found", "stale build start");
+});
+
+await caseRun("rejecting a visible compiled plan does not archive a hidden completed build", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const mission = readJson(cwd, ".mission/mission.json");
+  const graph = readJson(cwd, ".mission/task_graph.json");
+  mission.goal = "Update dashboard frontend copy";
+  mission.current_task_id = null;
+  graph.tasks = graph.tasks.map((task) => ({ ...task, status: "complete" }));
+  writeJson(cwd, ".mission/mission.json", mission);
+  writeJson(cwd, ".mission/task_graph.json", graph);
+
+  const startup = runMicrocoder(cwd, []);
+  assertStatus("visible compiled plan startup", startup, 0);
+  assertIncludes(startup.stdout, "I have a build plan from earlier: Build a browser Snake game.", "visible compiled plan startup");
+  assertNotIncludes(startup.stdout, "Update dashboard frontend copy", "visible compiled plan startup");
+
+  const result = runTui(cwd, "no");
+  assertStatus("reject visible plan", result, 0);
+  assertIncludes(result.stdout, "Okay. Starting fresh.", "reject visible plan");
+  assertNotIncludes(result.stdout, "set aside", "reject visible plan");
+  assertNotIncludes(result.stdout, "Update dashboard frontend copy", "reject visible plan");
+  const after = readJson(cwd, ".mission/mission.json");
+  if (after.mission_id !== mission.mission_id) throw new Error("rejecting visible plan changed the hidden build id");
+  if (after.goal !== "Update dashboard frontend copy") throw new Error(`rejecting visible plan changed hidden build goal ${after.goal}`);
+  if (fs.existsSync(path.join(cwd, ".mission", "archived_builds", mission.mission_id, "mission.json"))) {
+    throw new Error("rejecting visible plan archived the hidden completed build");
+  }
+  if (fs.existsSync(path.join(cwd, ".mission", "spec.json"))) throw new Error("rejecting visible plan left stale spec.json");
+});
+
+await caseRun("direct chat start over resets without starting a build", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  const reset = runMicrocoder(cwd, ["chat", "--interactive", "start over"]);
+  assertStatus("direct chat reset", reset, 0);
+  assertIncludes(reset.stdout, "Okay. Starting fresh.", "direct chat reset");
+  assertIncludes(reset.stdout, "What do you want to build?", "direct chat reset");
+  assertNotIncludes(reset.stdout, "Starting build from the compiled spec.", "direct chat reset");
+  if (fs.existsSync(path.join(cwd, ".mission", "spec.json"))) throw new Error("direct chat reset left stale spec.json");
+});
+
+await caseRun("direct chat start over archives active build", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const mission = readJson(cwd, ".mission/mission.json");
+  const reset = runMicrocoder(cwd, ["chat", "--interactive", "start over"]);
+  assertStatus("direct active chat reset", reset, 0);
+  assertIncludes(reset.stdout, "Okay. I set aside the paused build: Build a browser Snake game.", "direct active chat reset");
+  assertNotIncludes(reset.stdout, "Starting build from the compiled spec.", "direct active chat reset");
+  if (fs.existsSync(path.join(cwd, ".mission", "mission.json"))) throw new Error("direct active chat reset left mission.json");
+  assertFile(cwd, `.mission/archived_builds/${mission.mission_id}/mission.json`);
+});
+
+await caseRun("chat reset clears a compiled brief and stale spec without active build", (cwd) => {
+  assertStatus("compile todo", runTui(cwd, "build me a todo list"), 0);
+  assertFile(cwd, ".mission/spec.json");
+  const reset = runMicrocoder(cwd, ["chat", "reset"]);
+  assertStatus("chat reset no active", reset, 0);
+  if (fs.existsSync(path.join(cwd, ".mission", "spec.json"))) throw new Error("chat reset left stale spec.json");
+  const staleStart = runMicrocoder(cwd, ["build", "start"]);
+  if (staleStart.status === 0) throw new Error(`chat reset allowed stale build start\n${staleStart.output}`);
+  assertIncludes(staleStart.stderr, "compiled spec not found", "chat reset stale build start");
+});
+
+await caseRun("reset synonyms clear a compiled brief", (cwd) => {
+  for (const phrase of ["scratch that", "forget that", "clear this"]) {
+    const isolated = makeWorkspace(`reset ${phrase}`);
+    initWorkspace(isolated);
+    assertStatus(`compile ${phrase}`, runTui(isolated, "build me a todo list"), 0);
+    const result = runTui(isolated, phrase);
+    assertStatus(`reset ${phrase}`, result, 0);
+    assertIncludes(result.stdout, "Okay. Starting fresh.", `reset ${phrase}`);
+    assertNotIncludes(result.stdout, "I already have the build plan.", `reset ${phrase}`);
+    if (fs.existsSync(path.join(isolated, ".mission", "spec.json"))) throw new Error(`${phrase} left stale spec.json`);
+  }
+});
+
+await caseRun("start over and build new goal resets and compiles immediately", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  const result = runTui(cwd, "start over and build a todo list");
+  assertStatus("start over build todo", result, 0);
+  assertIncludes(result.stdout, "Okay. Starting fresh.", "start over build todo");
+  assertIncludes(result.stdout, "I have a build plan.", "start over build todo");
+  const spec = readJson(cwd, ".mission/spec.json");
+  if (spec.spec.goal !== "Build a local todo list app") throw new Error(`wrong reset+build goal ${spec.spec.goal}`);
+});
+
+await caseRun("direct chat start over and build resets and compiles immediately", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  const result = runMicrocoder(cwd, ["chat", "--interactive", "start over and build a todo list"]);
+  assertStatus("direct chat start over build todo", result, 0);
+  assertIncludes(result.stdout, "Okay. Starting fresh.", "direct chat start over build todo");
+  assertIncludes(result.stdout, "I have a build plan.", "direct chat start over build todo");
+  assertNotIncludes(result.stdout, "I already have the build plan.", "direct chat start over build todo");
+  const spec = readJson(cwd, ".mission/spec.json");
+  if (spec.spec.goal !== "Build a local todo list app") throw new Error(`wrong direct reset+build goal ${spec.spec.goal}`);
+});
+
+await caseRun("natural todo app request compiles without exact bare-name matching", (cwd) => {
+  const result = runTui(cwd, "I need a todo app");
+  assertStatus("natural todo app", result, 0);
+  assertIncludes(result.stdout, "I have a build plan.", "natural todo app");
+  assertNotIncludes(result.stdout, "What proves it is done?", "natural todo app");
+  const spec = fs.readFileSync(path.join(cwd, ".mission", "spec.json"), "utf8");
+  assertIncludes(spec, "Mark todos complete or active again", "natural todo app spec");
+});
+
+await caseRun("natural habit logging compiles as habit tracker", (cwd) => {
+  const result = runTui(cwd, "I want to log my habits");
+  assertStatus("habit logging", result, 0);
+  assertIncludes(result.stdout, "I have a build plan.", "habit logging");
+  const spec = fs.readFileSync(path.join(cwd, ".mission", "spec.json"), "utf8");
+  assertIncludes(spec, "Build a habit tracker", "habit logging spec");
+  assertIncludes(spec, "Check off habits for the current day", "habit logging spec");
+});
+
 await caseRun("todo list request replaces stale vague collecting brief", (cwd) => {
   const vague = runTui(cwd, "make the dashboard better");
   assertStatus("stale vague", vague, 0);
@@ -311,6 +722,45 @@ await caseRun("todo list request replaces stale vague collecting brief", (cwd) =
   assertNotIncludes(result.stdout, "Which exact user-visible behavior should change?", "todo after stale vague");
   const state = readJson(cwd, ".mission/chat/spec-chat.json");
   if (state.brief.goal !== "Build a local todo list app") throw new Error(`stale vague goal was not replaced: ${state.brief.goal}`);
+});
+
+await caseRun("scratch-that follow-up replaces compiled plan", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  const result = runTui(cwd, "wait, scratch that, build a memory matching card game");
+  assertStatus("scratch that", result, 0);
+  assertIncludes(result.stdout, "I have a build plan.", "scratch that");
+  assertNotIncludes(result.stdout, "I already have the build plan.", "scratch that");
+  const spec = fs.readFileSync(path.join(cwd, ".mission", "spec.json"), "utf8");
+  assertIncludes(spec, "Build a memory matching card game", "scratch that spec");
+  assertIncludes(spec, "Flip two cards at a time", "scratch that spec");
+  assertNotIncludes(spec, "\"billing\"", "scratch that spec");
+});
+
+await caseRun("no-prefixed follow-up replaces compiled plan", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  const result = runTui(cwd, "no, build a todo list");
+  assertStatus("no build todo", result, 0);
+  assertIncludes(result.stdout, "I have a build plan.", "no build todo");
+  assertNotIncludes(result.stdout, "I already have the build plan.", "no build todo");
+  const spec = readJson(cwd, ".mission/spec.json");
+  if (spec.spec.goal !== "Build a local todo list app") throw new Error(`wrong replacement goal ${spec.spec.goal}`);
+});
+
+await caseRun("scratch-that follow-up uses interface model for non-catalog plan", async (cwd) => {
+  const fake = await configureFakeInterfaceModel(cwd);
+  try {
+    assertStatus("compile snake", await runTuiAsync(cwd, "snake game"), 0);
+    const result = await runTuiAsync(cwd, "wait, scratch that, build a grant application reviewer for nonprofits");
+    assertStatus("scratch that interface model", result, 0);
+    assertIncludes(result.stdout, "I can shape that into a local grant-review app.", "scratch that interface model reply");
+    assertIncludes(result.stdout, "I have a build plan.", "scratch that interface model");
+    assertNotIncludes(result.stdout, "I already have the build plan.", "scratch that interface model");
+    const spec = fs.readFileSync(path.join(cwd, ".mission", "spec.json"), "utf8");
+    assertIncludes(spec, "Build a grant application reviewer for nonprofits", "scratch that interface spec");
+    assertIncludes(spec, "Score applications against review criteria", "scratch that interface spec");
+  } finally {
+    await fake.close();
+  }
 });
 
 await caseRun("simple snake request compiles cleanly without technical TUI leakage", (cwd) => {
@@ -326,11 +776,26 @@ await caseRun("simple snake request compiles cleanly without technical TUI leaka
   if (state.status !== "compiled") throw new Error(`snake state not compiled: ${state.status}`);
 });
 
+await caseRun("fake interface model handles non-catalog build request", async (cwd) => {
+  const fake = await configureFakeInterfaceModel(cwd);
+  try {
+    const result = await runTuiAsync(cwd, "build a grant application reviewer for nonprofits");
+    assertStatus("interface model grant reviewer", result, 0);
+    assertIncludes(result.stdout, "I can shape that into a local grant-review app.", "interface model grant reviewer reply");
+    assertIncludes(result.stdout, "I have a build plan.", "interface model grant reviewer");
+    const spec = fs.readFileSync(path.join(cwd, ".mission", "spec.json"), "utf8");
+    assertIncludes(spec, "Build a grant application reviewer for nonprofits", "interface model grant spec");
+    assertIncludes(spec, "Score applications against review criteria", "interface model grant spec");
+  } finally {
+    await fake.close();
+  }
+});
+
 await caseRun("compiled plan questions inspect without recompiling", (cwd) => {
   const first = runTui(cwd, "snake game");
   assertStatus("compile snake", first, 0);
   const before = specs(cwd);
-  for (const question of ["what are we building?", "show me the plan", "what is the spec?", "what's in scope?"]) {
+  for (const question of ["what are we building?", "what's the plan?", "show me the plan", "what is the spec?", "what's in scope?"]) {
     const result = runTui(cwd, question);
     assertStatus(question, result, 0);
     assertIncludes(result.stdout, "Build plan", question);
@@ -353,59 +818,295 @@ await caseRun("compiled confused follow-up stays helpful and does not recompile"
   if (JSON.stringify(specs(cwd)) !== JSON.stringify(before)) throw new Error("compiled confused follow-up recompiled specs");
 });
 
-await caseRun("approval phrases start the existing build", (cwd) => {
-  const phrases = ["go ahead", "yes, start building", "run with that", "looks good, build it"];
+await caseRun("approval phrases start the existing build", async (cwd) => {
+  const phrases = ["go", "let's go", "go ahead", "yes", "yes, start building", "run with that", "looks good, build it"];
   for (const phrase of phrases) {
     const isolated = makeWorkspace(`approval ${phrase}`);
     initWorkspace(isolated);
-    assertStatus("compile snake", runTui(isolated, "snake game"), 0);
-    const before = specs(isolated);
-    const result = runTui(isolated, phrase);
-    assertStatus(phrase, result, 0);
-    assertIncludes(result.stdout, "Starting build from the compiled spec.", phrase);
-    assertIncludes(result.stdout, "status active", phrase);
-    if (JSON.stringify(specs(isolated)) !== JSON.stringify(before)) throw new Error(`${phrase} recompiled specs`);
+    await (async () => {
+      let fakeModel = null;
+      try {
+        assertStatus("compile snake", runTui(isolated, "snake game"), 0);
+        shrinkCompiledSpecToOneTask(isolated);
+        fakeModel = await configureFakeCodeWriter(isolated);
+        const before = specs(isolated);
+        const result = await runTuiAsync(isolated, phrase);
+        assertStatus(phrase, result, 0);
+        assertIncludes(result.stdout, "Starting build from the compiled spec.", phrase);
+        assertIncludes(result.stdout, "build_task_start T1", phrase);
+        assertIncludes(result.stdout, "verification passed", phrase);
+        assertIncludes(result.stdout, "Build finished.", phrase);
+        if (JSON.stringify(specs(isolated)) !== JSON.stringify(before)) throw new Error(`${phrase} recompiled specs`);
+      } finally {
+        if (fakeModel) await fakeModel.close();
+      }
+    })();
   }
+});
+
+await caseRun("contextual continue language starts the existing build", async (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  shrinkCompiledSpecToOneTask(cwd);
+  const fakeModel = await configureFakeCodeWriter(cwd);
+  try {
+    const result = await runTuiAsync(cwd, "let's continue that one");
+    assertStatus("continue that one", result, 0);
+    assertIncludes(result.stdout, "Starting build from the compiled spec.", "continue that one");
+    assertIncludes(result.stdout, "build_task_start T1", "continue that one");
+    assertIncludes(result.stdout, "verification passed", "continue that one");
+    assertIncludes(result.stdout, "Build finished.", "continue that one");
+    assertNotIncludes(result.stdout, "I already have the build plan.", "continue that one");
+  } finally {
+    await fakeModel.close();
+  }
+});
+
+await caseRun("interface model classifies compiled plan control intent", async (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  shrinkCompiledSpecToOneTask(cwd);
+  const fakeModel = await configureFakeInterfaceAndCodeWriter(
+    cwd,
+    JSON.stringify({
+      kind: "start_current_plan",
+      confidence: 0.94,
+      reply: "Yep, I will continue the Snake build.",
+      reason: "The user accepted the existing plan.",
+    }),
+  );
+  try {
+    const result = await runTuiAsync(cwd, "the previous plan is fine");
+    assertStatus("previous plan is fine", result, 0);
+    assertIncludes(result.stdout, "Yep, I will continue the Snake build.", "previous plan is fine reply");
+    assertIncludes(result.stdout, "Starting build from the compiled spec.", "previous plan is fine");
+    assertIncludes(result.stdout, "build_task_start T1", "previous plan is fine");
+    assertIncludes(result.stdout, "Build finished.", "previous plan is fine");
+    assertNotIncludes(result.stdout, "I already have the build plan.", "previous plan is fine");
+    if (!fakeModel.requests.some((request) => request.includes("COMPILED_PLAN_CONTROL"))) {
+      throw new Error("compiled-plan control packet was not sent to the interface model");
+    }
+  } finally {
+    await fakeModel.close();
+  }
+});
+
+await caseRun("tetris plan starts when the user says lets go", async (cwd) => {
+  assertStatus("compile tetris", runTui(cwd, "a tetris game"), 0);
+  shrinkCompiledSpecToOneTask(cwd);
+  const fakeModel = await configureFakeCodeWriter(cwd);
+  try {
+    const result = await runTuiAsync(cwd, "let's go");
+    assertStatus("tetris lets go", result, 0);
+    assertIncludes(result.stdout, "Starting build from the compiled spec.", "tetris lets go");
+    assertIncludes(result.stdout, "build_task_start T1", "tetris lets go");
+    assertIncludes(result.stdout, "verification passed", "tetris lets go");
+    assertIncludes(result.stdout, "Build finished.", "tetris lets go");
+    assertNotIncludes(result.stdout, "I already have the build plan.", "tetris lets go");
+  } finally {
+    await fakeModel.close();
+  }
+});
+
+await caseRun("slow model generation keeps terminal progress alive", async (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  shrinkCompiledSpecToOneTask(cwd);
+  const fakeModel = await configureFakeCodeWriter(cwd, { delayMs: 1200 });
+  try {
+    const result = await runTuiAsync(cwd, "build it");
+    assertStatus("slow generation", result, 0);
+    assertIncludes(result.stdout, "build_progress generating_patch task_id=T1 model=qwen2.5-coder:7b provider=llamacpp timeout_seconds=2", "slow generation");
+    assertIncludes(result.stdout, "build_progress generating_patch_wait task_id=T1 elapsed_seconds=1 timeout_seconds=2", "slow generation");
+    assertIncludes(result.stdout, "build_progress generated_patch task_id=T1 model=qwen2.5-coder:7b provider=llamacpp latency_ms=", "slow generation");
+    assertIncludes(result.stdout, "Build finished.", "slow generation");
+  } finally {
+    await fakeModel.close();
+  }
+});
+
+await caseRun("slash build start does not dump the dashboard", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  const result = runTui(cwd, "/build start");
+  assertStatus("slash build start", result, 0);
+  assertIncludes(result.stdout, "Starting build from the compiled spec...", "slash build start");
+  assertIncludes(result.stdout, "build_id", "slash build start");
+  assertNotIncludes(result.stdout, "Microcoder Build Console", "slash build start");
+  assertNotIncludes(result.stdout, "Routes", "slash build start");
 });
 
 await caseRun("active build status blocks confused drift", (cwd) => {
   assertStatus("compile snake", runTui(cwd, "snake game"), 0);
-  assertStatus("build it", runTui(cwd, "build it"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
   const result = runTui(cwd, "??");
   assertStatus("active confused", result, 0);
-  assertIncludes(result.stdout, "Build already active.", "active confused");
-  assertIncludes(result.stdout, "Next: run `/build step` or `/build run`.", "active confused");
+  assertIncludes(result.stdout, "I found a paused build: Build a browser Snake game.", "active confused");
+  assertIncludes(result.stdout, "Do you want to continue building it or start fresh?", "active confused");
+});
+
+await caseRun("active build stop and progress intents stay conversational", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const progress = runTui(cwd, "what's next?");
+  assertStatus("active progress", progress, 0);
+  assertIncludes(progress.stdout, "Build in progress: Build a browser Snake game.", "active progress");
+  assertIncludes(progress.stdout, "Progress: 0/5 done", "active progress");
+  const stop = runTui(cwd, "stop");
+  assertStatus("active stop", stop, 0);
+  assertIncludes(stop.stdout, "Okay. I paused the build: Build a browser Snake game.", "active stop");
+  assertNotIncludes(stop.stdout, "Build already active.", "active stop");
+});
+
+await caseRun("continue resumes a paused build from normal language", async (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  shrinkCompiledSpecToOneTask(cwd);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  let fakeModel = null;
+  try {
+    fakeModel = await configureFakeCodeWriter(cwd);
+    const result = await runTuiAsync(cwd, "continue");
+    assertStatus("continue", result, 0);
+    assertIncludes(result.stdout, "Continuing build: Build a browser Snake game.", "continue");
+    assertIncludes(result.stdout, "build_task_start T1", "continue");
+    assertIncludes(result.stdout, "verification passed", "continue");
+    assertIncludes(result.stdout, "build_complete completed_tasks=1", "continue");
+    assertNotIncludes(result.stdout, "Microcoder Build Console", "continue");
+  } finally {
+    if (fakeModel) await fakeModel.close();
+  }
+});
+
+await caseRun("start fresh archives a paused build from normal language", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const mission = readJson(cwd, ".mission/mission.json");
+  const result = runTui(cwd, "start fresh");
+  assertStatus("start fresh", result, 0);
+  assertIncludes(result.stdout, "Okay. I set aside the paused build: Build a browser Snake game.", "start fresh");
+  assertIncludes(result.stdout, "What do you want to build?", "start fresh");
+  if (fs.existsSync(path.join(cwd, ".mission", "mission.json"))) throw new Error("start fresh left active mission.json");
+  assertFile(cwd, `.mission/archived_builds/${mission.mission_id}/mission.json`);
+});
+
+await caseRun("lets start over archives a paused build from normal language", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const mission = readJson(cwd, ".mission/mission.json");
+  const result = runTui(cwd, "let's start over");
+  assertStatus("lets start over", result, 0);
+  assertIncludes(result.stdout, "Okay. I set aside the paused build: Build a browser Snake game.", "lets start over");
+  assertIncludes(result.stdout, "What do you want to build?", "lets start over");
+  assertNotIncludes(result.stdout, "Build already active.", "lets start over");
+  if (fs.existsSync(path.join(cwd, ".mission", "mission.json"))) throw new Error("lets start over left active mission.json");
+  assertFile(cwd, `.mission/archived_builds/${mission.mission_id}/mission.json`);
+});
+
+await caseRun("start over and build new goal archives paused build then compiles", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const mission = readJson(cwd, ".mission/mission.json");
+  const result = runTui(cwd, "start over and build a todo list");
+  assertStatus("start over active build todo", result, 0);
+  assertIncludes(result.stdout, "Okay. I set aside the paused build: Build a browser Snake game.", "start over active build todo");
+  assertIncludes(result.stdout, "I have a build plan.", "start over active build todo");
+  assertFile(cwd, `.mission/archived_builds/${mission.mission_id}/mission.json`);
+  const spec = readJson(cwd, ".mission/spec.json");
+  if (spec.spec.goal !== "Build a local todo list app") throw new Error(`wrong active reset+build goal ${spec.spec.goal}`);
 });
 
 await caseRun("new object-bearing goal during active build creates a separate brief", (cwd) => {
   assertStatus("compile snake", runTui(cwd, "snake game"), 0);
-  assertStatus("build it", runTui(cwd, "build it"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
   const mission = readJson(cwd, ".mission/mission.json");
   const result = runTui(cwd, "make a todo tracker");
   assertStatus("new goal active", result, 0);
   assertIncludes(result.stdout, "I have a build plan.", "new goal active");
-  assertIncludes(result.stdout, "Existing build still active:", "new goal active");
-  assertIncludes(result.stdout, mission.mission_id, "new goal active");
+  assertNotIncludes(result.stdout, "Existing build still active:", "new goal active");
+  assertNotIncludes(result.stdout, "Finish it with `/build step` or `/build run`", "new goal active");
   const state = readJson(cwd, ".mission/chat/spec-chat.json");
   assertIncludes(state.brief.goal ?? "", "todo list", "new goal state");
+  const after = readJson(cwd, ".mission/mission.json");
+  if (after.mission_id !== mission.mission_id) throw new Error("new goal should not replace paused build until build it is requested");
 });
 
-await caseRun("new buildable goal during active build warns and does not overwrite active build", (cwd) => {
+await caseRun("building a new compiled plan archives the old active build first", async (cwd) => {
   assertStatus("compile snake", runTui(cwd, "snake game"), 0);
-  assertStatus("build it", runTui(cwd, "build it"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const oldMission = readJson(cwd, ".mission/mission.json");
+  const newPlanOutput = runTui(cwd, "make a todo tracker");
+  assertStatus("compile todo while active", newPlanOutput, 0);
+  assertIncludes(newPlanOutput.stdout, "Your current build is still paused: Build a browser Snake game.", "compile todo while active");
+  const stillOld = readJson(cwd, ".mission/mission.json");
+  if (stillOld.mission_id !== oldMission.mission_id) throw new Error("new brief overwrote old build before build it");
+  shrinkCompiledSpecToOneTask(cwd);
+  let fakeModel = null;
+  try {
+    fakeModel = await configureFakeCodeWriter(cwd);
+    const result = await runTuiAsync(cwd, "build it");
+    assertStatus("build replacement", result, 5);
+    assertIncludes(result.stdout, "Set aside active build: Build a browser Snake game.", "build replacement");
+    assertIncludes(result.stdout, "Starting build from the compiled spec.", "build replacement");
+    assertIncludes(result.stdout, "Build stopped with exit code 5.", "build replacement");
+    assertFile(cwd, `.mission/archived_builds/${oldMission.mission_id}/mission.json`);
+    const mission = readJson(cwd, ".mission/mission.json");
+    if (mission.mission_id === oldMission.mission_id) throw new Error("replacement reused old mission id");
+    if (mission.goal !== "Build a local todo list app") throw new Error(`replacement started wrong goal ${mission.goal}`);
+  } finally {
+    if (fakeModel) await fakeModel.close();
+  }
+});
+
+await caseRun("same-goal build phrasing keeps the active build", async (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  shrinkActiveTaskGraphToOneTask(cwd);
   const mission = readJson(cwd, ".mission/mission.json");
-  const result = runTui(cwd, "build snake");
+  const specPath = path.join(cwd, ".mission", "spec.json");
+  const specMtime = fs.statSync(specPath).mtimeMs;
+  let fakeModel = null;
+  try {
+    fakeModel = await configureFakeCodeWriter(cwd);
+    const sameGoal = await runTuiAsync(cwd, "build snake");
+    assertStatus("same goal active", sameGoal, 0);
+    assertIncludes(sameGoal.stdout, `Continuing build ${mission.mission_id}.`, "same goal active");
+    assertNotIncludes(sameGoal.stdout, "I have a build plan.", "same goal active");
+    assertNotIncludes(sameGoal.stdout, "Set aside active build:", "same goal active");
+    if (fs.statSync(specPath).mtimeMs !== specMtime) throw new Error("same-goal phrasing rewrote spec.json");
+    const after = readJson(cwd, ".mission/mission.json");
+    if (after.mission_id !== mission.mission_id) throw new Error("same-goal phrasing replaced active mission");
+  } finally {
+    if (fakeModel) await fakeModel.close();
+  }
+});
+
+await caseRun("new buildable goal during active build stays conversational and does not overwrite active build", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
+  const mission = readJson(cwd, ".mission/mission.json");
+  const result = runTui(cwd, "build a calculator");
   assertStatus("new buildable active", result, 0);
-  assertIncludes(result.stdout, "Existing build still active:", "new buildable active");
-  assertIncludes(result.stdout, mission.mission_id, "new buildable active");
+  assertIncludes(result.stdout, "I have a build plan.", "new buildable active");
+  assertIncludes(result.stdout, "Your current build is still paused: Build a browser Snake game.", "new buildable active");
+  assertNotIncludes(result.stdout, "Existing build still active:", "new buildable active");
+  assertNotIncludes(result.stdout, "Finish it with `/build step` or `/build run`", "new buildable active");
   const after = readJson(cwd, ".mission/mission.json");
   if (after.mission_id !== mission.mission_id) throw new Error("new buildable goal overwrote active build");
 });
 
+await caseRun("double build start does not overwrite the active build", (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  assertStatus("first build start", runMicrocoder(cwd, ["build", "start"]), 0);
+  const mission = readJson(cwd, ".mission/mission.json");
+  const second = runMicrocoder(cwd, ["build", "start"]);
+  assertStatus("second build start", second, 0);
+  assertIncludes(second.stdout, "build_already_active", "second build start");
+  assertIncludes(second.stdout, `build_id ${mission.mission_id}`, "second build start");
+  const after = readJson(cwd, ".mission/mission.json");
+  if (after.mission_id !== mission.mission_id) throw new Error("second build start overwrote mission.json");
+});
+
 await caseRun("chat reset clears the brief and does not touch active build", (cwd) => {
   assertStatus("compile snake", runTui(cwd, "snake game"), 0);
-  assertStatus("build it", runTui(cwd, "build it"), 0);
+  assertStatus("build start", runTui(cwd, "/build start"), 0);
   const mission = readJson(cwd, ".mission/mission.json");
+  assertFile(cwd, ".mission/spec.json");
   const reset = runMicrocoder(cwd, ["chat", "reset"]);
   assertStatus("chat reset", reset, 0);
   const status = runMicrocoder(cwd, ["chat", "status"]);
@@ -413,6 +1114,29 @@ await caseRun("chat reset clears the brief and does not touch active build", (cw
   assertIncludes(status.stdout, "goal none", "chat reset status");
   const after = readJson(cwd, ".mission/mission.json");
   if (after.mission_id !== mission.mission_id) throw new Error("chat reset changed active build");
+  assertFile(cwd, ".mission/spec.json");
+});
+
+await caseRun("continue after a completed build reports complete", async (cwd) => {
+  assertStatus("compile snake", runTui(cwd, "snake game"), 0);
+  shrinkCompiledSpecToOneTask(cwd);
+  let fakeModel = null;
+  try {
+    fakeModel = await configureFakeCodeWriter(cwd);
+    assertStatus("build it", await runTuiAsync(cwd, "build it"), 0);
+    const result = runTui(cwd, "continue");
+    assertStatus("continue complete", result, 0);
+    assertIncludes(result.stdout, "Build already complete.", "continue complete");
+    assertNotIncludes(result.stdout, "I already have the build plan.", "continue complete");
+  } finally {
+    if (fakeModel) await fakeModel.close();
+  }
+});
+
+await caseRun("build step without active build gives friendly error", (cwd) => {
+  const result = runMicrocoder(cwd, ["build", "step"]);
+  assertStatus("build step no active", result, 1);
+  assertIncludes(result.stderr, "No build is active. Tell me what to build first, then say `build it`.", "build step no active");
 });
 
 await caseRun("web research off does not create standards context", (cwd) => {
@@ -478,7 +1202,7 @@ await caseRun("slash commands stay readable and scoped", (cwd) => {
 });
 
 await caseRun("scripted stdin session preserves interactive behavior", (cwd) => {
-  const result = runMicrocoder(cwd, [], { input: "hi\nsnake game\nwhat are we building?\nbuild it\n/exit\n" });
+  const result = runMicrocoder(cwd, [], { input: "hi\nsnake game\nwhat are we building?\n/build start\n/exit\n" });
   assertStatus("stdin session", result, 0);
   assertIncludes(result.stdout, "Hey. What do you want to build?", "stdin session");
   assertIncludes(result.stdout, "I have a build plan.", "stdin session");
@@ -569,7 +1293,10 @@ async function runBrowserPtyCase() {
       const page = await browser.newPage();
       await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       await page.getByRole("heading", { name: "Microcoder PTY Console" }).waitFor();
-      await waitForOutput("Microcoder Build Console");
+      const startup = await waitForOutput("Hey. What do you want to build?");
+      assertNotIncludes(startup.output, "Microcoder Build Console", "browser startup");
+      assertNotIncludes(startup.output, "Routes", "browser startup");
+      assertNotIncludes(startup.output, "Commands:", "browser startup");
 
       await sendBrowserCommand(page, "what can you do?");
       await waitForOutput("Tell me what you want to build in plain English");
@@ -591,7 +1318,7 @@ async function runBrowserPtyCase() {
         if (!artifactPaths.includes(required)) throw new Error(`artifact endpoint missed ${required}: ${JSON.stringify(artifactPaths)}`);
       }
 
-      await sendBrowserCommand(page, "build it");
+      await sendBrowserCommand(page, "/build start");
       const buildOutput = await waitForOutput("status active");
       assertIncludes(buildOutput.output, "Starting build from the compiled spec.", "browser build start");
       assertIncludes(buildOutput.output, "build_id", "browser build start");

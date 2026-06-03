@@ -5,13 +5,14 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { loadConfig } from "../core/config/config.js";
 import { missionDir } from "../core/storage/sqlite.js";
-import { loadSpecChatState } from "../core/chat/spec-chat.js";
+import { loadSpecChatState, resetSpecChatState } from "../core/chat/spec-chat.js";
 import { loadModelRegistry, MODEL_ROLES, routeModel } from "../core/models/orchestrator.js";
 import { effectiveModelProvider, resolveLlamaCppModelPath } from "../core/models/llamacpp-backend.js";
 import { getRepoStatus } from "../core/repo/brain.js";
 import { findPackageRoot } from "../core/utils/paths.js";
 import type { CliIO, RunOptions } from "./run.js";
 import type { MmcConfig } from "../core/config/defaults.js";
+import { archiveActiveMission, clearLatestCompileResult } from "../core/mission/ledger.js";
 import type { Mission } from "../core/mission/ledger.js";
 import type { RuntimeTask, TaskGraph } from "../core/spec/compiler.js";
 
@@ -20,7 +21,10 @@ export type TuiCommand =
   | { kind: "exit" }
   | { kind: "help" }
   | { kind: "message"; message: string }
+  | { kind: "resume_build" }
   | { kind: "snapshot" }
+  | { kind: "start_fresh"; archiveResumable?: boolean }
+  | { kind: "start_fresh_with_message"; message: string; archiveResumable?: boolean }
   | { kind: "run"; argv: string[]; refreshAfter: boolean; echo?: boolean; display?: string; progress?: string };
 
 export type TuiRunner = (argv: string[], options?: RunOptions) => Promise<number>;
@@ -71,9 +75,9 @@ export async function runTui(cwd: string, args: string[], io: CliIO, runner: Tui
   }
 
   if (!input.isTTY) {
-    const lines = fs.readFileSync(0, "utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const lines = readPipedInputLines();
     if (lines.length === 0) {
-      io.stdout(buildTuiSnapshot(cwd));
+      io.stdout(buildStartupMessage(cwd));
       return 0;
     }
     let code = 0;
@@ -84,13 +88,13 @@ export async function runTui(cwd: string, args: string[], io: CliIO, runner: Tui
     return code;
   }
 
-  output.write(`${buildTuiSnapshot(cwd)}\n\n${TUI_HELP}\n\n`);
+  output.write(`${buildStartupMessage(cwd)}\n`);
   const rl = createInterface({ input, output, prompt: "microcoder> " });
   rl.prompt();
   for await (const line of rl) {
     const text = line.trim();
     try {
-      const commandResult = parseTuiCommand(text);
+      const commandResult = parseTuiCommandForCwd(cwd, text);
       if (commandResult.kind === "exit") break;
       await executeParsedTuiCommand(cwd, commandResult, io, runner);
     } catch (error) {
@@ -102,8 +106,23 @@ export async function runTui(cwd: string, args: string[], io: CliIO, runner: Tui
   return 0;
 }
 
+function readPipedInputLines(): string[] {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(0, "utf8");
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "EAGAIN") return [];
+    throw error;
+  }
+  return raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
 export async function executeTuiLine(cwd: string, line: string, io: CliIO, runner: TuiRunner): Promise<number> {
-  return executeParsedTuiCommand(cwd, parseTuiCommand(line), io, runner);
+  return executeParsedTuiCommand(cwd, parseTuiCommandForCwd(cwd, line), io, runner);
 }
 
 export async function executeParsedTuiCommand(cwd: string, command: TuiCommand, io: CliIO, runner: TuiRunner): Promise<number> {
@@ -116,6 +135,47 @@ export async function executeParsedTuiCommand(cwd: string, command: TuiCommand, 
   if (command.kind === "message") {
     io.stdout(command.message);
     return 0;
+  }
+  if (command.kind === "resume_build") {
+    const resumable = findResumableBuild(cwd);
+    if (!resumable) {
+      io.stdout("No paused build here. What do you want to build?");
+      return 0;
+    }
+    io.stdout(`Continuing build: ${resumable.mission.goal}.`);
+    const code = await runner(["build", "run"], { cwd, io });
+    io.stdout(code === 0 ? "Build finished." : `Build stopped with exit code ${code}.`);
+    return code;
+  }
+  if (command.kind === "start_fresh") {
+    const loaded = loadConfig(cwd);
+    if (loaded.errors.length) {
+      io.stderr(`config validation failed:\n${loaded.errors.map((error) => `- ${error}`).join("\n")}`);
+      return 1;
+    }
+    const archived = command.archiveResumable ? archiveActiveMission(cwd, loaded.config, "user_start_fresh") : null;
+    resetSpecChatState(cwd, loaded.config);
+    if (archived) {
+      clearLatestCompileResult(cwd, loaded.config);
+      io.stdout(`Okay. I set aside the paused build: ${archived.mission.goal}.`);
+    } else {
+      clearLatestCompileResult(cwd, loaded.config);
+      io.stdout("Okay. Starting fresh.");
+    }
+    io.stdout("What do you want to build?");
+    return 0;
+  }
+  if (command.kind === "start_fresh_with_message") {
+    const loaded = loadConfig(cwd);
+    if (loaded.errors.length) {
+      io.stderr(`config validation failed:\n${loaded.errors.map((error) => `- ${error}`).join("\n")}`);
+      return 1;
+    }
+    const archived = command.archiveResumable ? archiveActiveMission(cwd, loaded.config, "user_start_fresh") : null;
+    resetSpecChatState(cwd, loaded.config);
+    clearLatestCompileResult(cwd, loaded.config);
+    io.stdout(archived ? `Okay. I set aside the paused build: ${archived.mission.goal}.` : "Okay. Starting fresh.");
+    return await runner(["chat", "--interactive", command.message], { cwd, io });
   }
   if (command.kind === "snapshot") {
     io.stdout(buildTuiSnapshot(cwd));
@@ -131,6 +191,35 @@ export async function executeParsedTuiCommand(cwd: string, command: TuiCommand, 
     io.stdout(buildTuiSnapshot(cwd));
   }
   return code;
+}
+
+function parseTuiCommandForCwd(cwd: string, line: string): TuiCommand {
+  const text = line.trim();
+  if (text && !text.startsWith("/")) {
+    const resumable = findResumableBuild(cwd);
+    const restartMessage = extractStartFreshMessage(text);
+    if (resumable && restartMessage) {
+      return { kind: "start_fresh_with_message", message: restartMessage, archiveResumable: Boolean(resumable) };
+    }
+    if (resumable && isResumeBuildChoice(text)) return { kind: "resume_build" };
+    if (resumable && isStartFreshChoice(text)) return { kind: "start_fresh", archiveResumable: Boolean(resumable) };
+    if (resumable && isPauseChoice(text)) {
+      return {
+        kind: "message",
+        message: `Okay. I paused the build: ${resumable.mission.goal}.\nSay \`continue\` to resume it, or \`start over\` to discard it.`,
+      };
+    }
+    if (resumable && isProgressChoice(text)) {
+      return {
+        kind: "message",
+        message: buildResumableProgressMessage(resumable),
+      };
+    }
+    if (resumable && isConfusedChoice(text)) {
+      return { kind: "message", message: buildStartupResumePrompt(cwd) ?? "Do you want to continue building it or start fresh?" };
+    }
+  }
+  return parseTuiCommand(line);
 }
 
 export function parseTuiCommand(line: string): TuiCommand {
@@ -173,10 +262,110 @@ export function parseTuiCommand(line: string): TuiCommand {
 }
 
 function parsePlainTextInput(text: string): TuiCommand {
-  if (/^(hi|hello|hey|yo|sup)\b[!. ]*$/i.test(text)) {
+  if (/^(exit|quit|bye|goodbye)$/i.test(text.trim())) {
+    return { kind: "exit" };
+  }
+  if (/^(h|hi|hello|hey|yo|sup)\b[!. ]*$/i.test(text)) {
     return { kind: "message", message: "Hey. What do you want to build?" };
   }
-  return { kind: "run", argv: ["chat", "--interactive", text], refreshAfter: false, echo: false };
+  return {
+    kind: "run",
+    argv: ["chat", "--interactive", text],
+    refreshAfter: false,
+    echo: false,
+  };
+}
+
+function isResumeBuildChoice(text: string): boolean {
+  return normalizeChoiceVariants(text).some((variant) =>
+    /^(continue|continue building|resume|resume build|resume building|keep going|keep building|lets keep going|pick up|pick up where we left off|im back|continue with that one|yes|y|yeah|yep|sure)(\s+(it|this|that|the build))?$/.test(variant),
+  );
+}
+
+function isStartFreshChoice(text: string): boolean {
+  const normalized = normalizeChoice(text);
+  if (/^(no|n|nope)$/.test(normalized)) return true;
+  return normalizeChoiceVariants(text).some((variant) =>
+    /^(start fresh|fresh start|start over|restart|start a new one|start new|new build|new one|new|reset|scratch that|forget it|forget this|forget that|discard it|discard this|discard that|abandon it|abandon this|abandon that|clear it|clear this|clear that|leave it)(\s+(please|now|instead|it|this|that|the build|the old build|the plan))?$/.test(variant),
+  );
+}
+
+function isPauseChoice(text: string): boolean {
+  return normalizeChoiceVariants(text).some((variant) =>
+    /^(stop|cancel|pause|wait|hold on|actually no|never mind|nevermind|undo|not now|not yet)$/.test(variant),
+  );
+}
+
+function isProgressChoice(text: string): boolean {
+  return normalizeChoiceVariants(text).some((variant) =>
+    /^(whats next|where were we|hows the build going|show progress|any progress|progress|status|what now)$/.test(variant),
+  );
+}
+
+function isConfusedChoice(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  return /^\?+$/.test(trimmed) || /^(huh|what\??|what now)$/i.test(trimmed);
+}
+
+function extractStartFreshMessage(text: string): string | null {
+  const normalized = normalizeChoice(text);
+  const match = normalized.match(
+    /^(?:(?:lets|let us)\s+)?(?:start over|start fresh|fresh start|new build|new one|reset|scratch that|forget it|forget this|forget that|discard it|discard this|discard that|clear it|clear this|clear that)(?:\s+(?:and|then|instead|now))?\s+(.+)$/,
+  );
+  if (!match?.[1]) return null;
+  const rest = match[1].trim();
+  if (!rest || /^(please|now|instead|it|this|that|the build|the old build|the plan)$/.test(rest)) return null;
+  if (/^(build|make|create|implement|add)\b/.test(rest)) return rest;
+  if (/^(a|an|the)\s+/.test(rest) || /\b(app|game|site|website|dashboard|tool|tracker|reviewer|manager|system|portal|list)\b/.test(rest)) {
+    return `build ${rest}`;
+  }
+  return null;
+}
+
+function normalizeChoice(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[.,;:!?]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeChoiceVariants(text: string): string[] {
+  const variants = new Set<string>();
+  let current = normalizeChoice(text);
+  variants.add(current);
+  for (let i = 0; i < 4; i += 1) {
+    const stripped = stripChoiceLead(current);
+    if (stripped === current) break;
+    variants.add(stripped);
+    current = stripped;
+  }
+  return [...variants];
+}
+
+function stripChoiceLead(text: string): string {
+  return text
+    .replace(/^(ok|okay|alright|fine|yes|yeah|yep|sure|please)\s+/, "")
+    .replace(/^no\s+/, "")
+    .replace(/^(lets|let us)\s+/, "")
+    .replace(/^just\s+/, "")
+    .replace(/^i\s+(want|need|would like|d like|wanna)\s+(to\s+)?/, "")
+    .replace(/^can\s+(we|you)\s+/, "")
+    .replace(/^could\s+(we|you)\s+/, "")
+    .replace(/^we\s+should\s+/, "")
+    .trim();
+}
+
+function buildResumableProgressMessage(resumable: NonNullable<ReturnType<typeof findResumableBuild>>): string {
+  const progress = resumable.tasks.length ? `${resumable.counts.complete}/${resumable.tasks.length} done` : "progress unknown";
+  const next = resumable.next ? `; next is ${resumable.next.id} ${stripTerminalPunctuation(shorten(resumable.next.title, 80))}` : "";
+  return [
+    `Build in progress: ${shorten(resumable.mission.goal, 90)}.`,
+    `Progress: ${progress}${next}.`,
+    "Say `continue` to keep building, or `start over` to discard it.",
+  ].join("\n");
 }
 
 function parsePatchCommand(rest: string): TuiCommand {
@@ -271,12 +460,51 @@ export function buildTuiSnapshot(cwd: string): string {
   return lines.join("\n");
 }
 
+export function buildStartupResumePrompt(cwd: string): string | null {
+  const resumable = findResumableBuild(cwd);
+  if (!resumable) return null;
+  const { mission, tasks, counts, next } = resumable;
+  const progress = tasks.length ? `${counts.complete}/${tasks.length} done` : "progress unknown";
+  const nextText = next ? `${next.id} ${stripTerminalPunctuation(shorten(next.title, 80))}` : "";
+  return [
+    `I found a paused build: ${shorten(mission.goal, 90)}.`,
+    `Progress: ${progress}${next ? `; next is ${nextText}` : ""}.`,
+    "Do you want to continue building it or start fresh?",
+  ].join("\n");
+}
+
+export function buildStartupMessage(cwd: string): string {
+  const resumePrompt = buildStartupResumePrompt(cwd);
+  if (resumePrompt) return resumePrompt;
+
+  const loaded = loadConfig(cwd);
+  if (loaded.errors.length) {
+    return "Config is invalid. Run `/doctor` for details.";
+  }
+
+  const chat = loadSpecChatState(cwd, loaded.config);
+  if (chat.status === "compiled" && chat.brief.goal) {
+    return [
+      `I have a build plan from earlier: ${shorten(stripTerminalPunctuation(chat.brief.goal), 90)}.`,
+      "Say `build it` to start, ask `what's the plan?`, or say `start over`.",
+    ].join("\n");
+  }
+  if (chat.brief.goal) {
+    const next = chat.pending_questions[0]?.text;
+    return [
+      `We're shaping: ${shorten(stripTerminalPunctuation(chat.brief.goal), 90)}.`,
+      next ?? "Tell me what should happen next.",
+    ].join("\n");
+  }
+  return "Hey. What do you want to build?";
+}
+
 function parseBuildCommand(commandLine: string, label: "/build" | "/mission"): TuiCommand {
   const [command, ...rest] = splitArgs(commandLine);
   if (!command || command === "status") return { kind: "snapshot" };
   if (command === "spec") return { kind: "run", argv: ["spec", "create", rest.join(" ")], refreshAfter: true };
   if (command === "compile") return { kind: "run", argv: ["spec", "compile", ...rest], refreshAfter: true };
-  if (command === "start") return { kind: "run", argv: ["build", "start", ...rest], refreshAfter: true, progress: "Starting build from the compiled spec..." };
+  if (command === "start") return { kind: "run", argv: ["build", "start", ...rest], refreshAfter: false, progress: "Starting build from the compiled spec..." };
   if (command === "next") return { kind: "run", argv: ["task", "next"], refreshAfter: false };
   if (command === "step") {
     return {
@@ -343,6 +571,19 @@ function safeRepoStatus(cwd: string, config: MmcConfig): { status: string; dirty
   } catch {
     return { status: "unknown", dirty_files: [] };
   }
+}
+
+function findResumableBuild(cwd: string): { mission: Mission; tasks: RuntimeTask[]; counts: Record<RuntimeTask["status"], number>; next: RuntimeTask | null } | null {
+  const loaded = loadConfig(cwd);
+  if (loaded.errors.length) return null;
+  const root = missionDir(cwd, loaded.config);
+  const mission = readJsonFile<Mission>(path.join(root, "mission.json"));
+  if (!mission || mission.status !== "active") return null;
+  const graph = readJsonFile<TaskGraph>(path.join(root, "task_graph.json"));
+  const tasks = graph?.tasks ?? [];
+  if (tasks.length > 0 && tasks.every((task) => task.status === "complete")) return null;
+  const next = tasks.find((task) => task.status === "ready") ?? tasks.find((task) => task.status === "todo") ?? null;
+  return { mission, tasks, counts: countTasks(tasks), next };
 }
 
 function countTasks(tasks: RuntimeTask[]): Record<RuntimeTask["status"], number> {
@@ -423,4 +664,8 @@ async function startWebTui(cwd: string, args: string[], io: CliIO): Promise<numb
 
 function shorten(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max - 3)}...`;
+}
+
+function stripTerminalPunctuation(value: string): string {
+  return value.replace(/[.?!]+$/g, "");
 }

@@ -42,6 +42,15 @@ export type MmcConfig = {
     user_agent: string;
     allowed_domains: string[];
   };
+  chat: {
+    interface_model: {
+      enabled: boolean;
+      require_explicit_route: boolean;
+      timeout_seconds: number;
+      fallback_to_heuristics: boolean;
+      minimum_confidence: number;
+    };
+  };
   models: {
     provider_default: string;
     registry_path: string;
@@ -149,6 +158,15 @@ export const DEFAULT_CONFIG: MmcConfig = {
     user_agent: "microcoder/0.1 local docs research",
     allowed_domains: [],
   },
+  chat: {
+    interface_model: {
+      enabled: true,
+      require_explicit_route: true,
+      timeout_seconds: 12,
+      fallback_to_heuristics: true,
+      minimum_confidence: 0.55,
+    },
+  },
   models: {
     provider_default: "ollama",
     registry_path: "./12_MODEL_PROFILES.yaml",
@@ -225,6 +243,53 @@ export const DEFAULT_CONFIG: MmcConfig = {
   },
 };
 
+const MODEL_CHEAT_SHEET = `# Model routing cheat sheet
+# This is comments only. Copy the lines you want into the real models block above.
+#
+# Pin a role:
+# models:
+#   role_overrides:
+#     interface: liquid-lfm2-1.2b
+#     code_writer: qwen2.5-coder:7b
+#     test_writer: phi4-mini
+#     reviewer: phi4-mini
+#
+# Use llama.cpp for the interface model:
+# models:
+#   llamacpp:
+#     llama_server_path: /opt/homebrew/bin/llama-server
+#     auto_start: true
+#     auto_stop_after_request: true
+#     model_paths:
+#       interface: /path/to/Models/LiquidAI/LFM2-1.2B-GGUF/LFM2-1.2B-Q4_K_M.gguf
+#       liquid-lfm2-1.2b: /path/to/Models/LiquidAI/LFM2-1.2B-GGUF/LFM2-1.2B-Q4_K_M.gguf
+#
+# Available model ids by role:
+# interface:
+#   gemma3:1b                  ollama   hot   8GB   ctx 32768
+#   liquid-lfm2-1.2b           llamacpp warm  16GB  ctx 32768
+# spec_critic:
+#   smollm2:360m               ollama   hot   8GB   ctx 8192
+#   gemma3:1b                  ollama   hot   8GB   ctx 32768
+# planner:
+#   gemma3:1b                  ollama   hot   8GB   ctx 32768
+# code_writer:
+#   qwen2.5-coder:3b           ollama   warm  16GB  ctx 32768
+#   qwen2.5-coder:7b           ollama   warm  24GB  ctx 32768
+# test_writer:
+#   qwen2.5-coder:7b           ollama   warm  24GB  ctx 32768
+#   phi4-mini                  ollama   cold  24GB  ctx 32768
+# reviewer:
+#   gemma3:1b                  ollama   hot   8GB   ctx 32768
+#   phi4-mini                  ollama   cold  24GB  ctx 32768
+# visual_inspector:
+#   moondream                  ollama   cold  32GB  ctx 8192
+`;
+
+export function renderConfig(config: MmcConfig): string {
+  return `${stringify(config).trimEnd()}\n\n${MODEL_CHEAT_SHEET}`;
+}
+
 export function renderDefaultConfig(): string {
-  return stringify(DEFAULT_CONFIG);
+  return renderConfig(DEFAULT_CONFIG);
 }

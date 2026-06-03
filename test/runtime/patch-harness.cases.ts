@@ -35,6 +35,7 @@ import {
   vi,
   writeFakeLlamaServer,
 } from "./support.js";
+import { spawnSync } from "node:child_process";
 
 describe("Micro Mission Coder runtime - patch harness", () => {
 it("patch harness rejects files outside allowed scope and test-disable patches", () => {
@@ -161,6 +162,44 @@ it("patch harness recounts model diffs with invalid hunk lengths before applying
     });
     expect(result.status).toBe("applied");
     expect(fs.readFileSync(path.join(result.worktree_path, "src", "hello.ts"), "utf8")).toContain("'new'");
+  });
+
+it("patch harness preflights multi-file patches without leaving partial changes or reject files", () => {
+    const cwd = tempWorkspace();
+    fs.writeFileSync(path.join(cwd, "index.html"), "<main>Old</main>\n");
+    fs.writeFileSync(path.join(cwd, "README.md"), "# New title\n");
+    spawnSync("git", ["init"], { cwd });
+    spawnSync("git", ["add", "index.html", "README.md"], { cwd });
+    spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial"], { cwd });
+
+    const loaded = loadConfig(cwd);
+    initializeDatabase(cwd, loaded.config);
+    const patch = `diff --git a/index.html b/index.html
+--- a/index.html
++++ b/index.html
+@@ -1 +1 @@
+-<main>Old</main>
++<main>New</main>
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-# Old title
++# New title
+`;
+    const result = applyPatchInWorktree({
+      cwd,
+      config: loaded.config,
+      taskId: "T1",
+      patch,
+      allowedFiles: ["index.html", "README.md"],
+    });
+    expect(result.status).toBe("failed_apply");
+    expect(result.worktree_mode).toBe("git_worktree");
+    expect(fs.readFileSync(path.join(result.worktree_path, "index.html"), "utf8")).toBe("<main>Old</main>\n");
+    expect(fs.readFileSync(path.join(result.worktree_path, "README.md"), "utf8")).toBe("# New title\n");
+    expect(fs.existsSync(path.join(result.worktree_path, "README.md.rej"))).toBe(false);
+    expect(result.stderr).toMatch(/preflight|dry run|Reversed|previously applied|FAILED/i);
   });
 
 it("patch harness repairs model-prefixed multi-file diff headers before applying", () => {

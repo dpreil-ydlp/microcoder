@@ -1,9 +1,38 @@
+# Dependencies and build output
 node_modules/
 dist/
+coverage/
+.nyc_output/
+
+# Local runtime, proofs, and operator state
 .mission/
 .gauntlet/
 gauntlet-report.md
+GOAL_STATE.md
 .micro-mission-coder.yaml
+*.log
+*.pid
+*.sqlite
+*.sqlite3
+*.db
+
+# Local env and credentials
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Local model weights and generated ML artifacts
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# OS and language cache noise
 .DS_Store
 __pycache__/
 *.pyc

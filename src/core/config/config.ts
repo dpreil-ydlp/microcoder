@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { parse, stringify } from "yaml";
-import { DEFAULT_CONFIG, renderDefaultConfig, type MmcConfig } from "./defaults.js";
+import { parse } from "yaml";
+import { DEFAULT_CONFIG, renderConfig, renderDefaultConfig, type MmcConfig } from "./defaults.js";
 import { isHardwareProfileName } from "../hardware/profile.js";
 
 export const CONFIG_FILE = ".micro-mission-coder.yaml";
@@ -48,7 +48,7 @@ export function loadConfig(cwd: string): LoadedConfig {
 }
 
 export function saveConfig(cwd: string, config: MmcConfig): void {
-  fs.writeFileSync(configPath(cwd), stringify(config), "utf8");
+  fs.writeFileSync(configPath(cwd), renderConfig(config), "utf8");
 }
 
 export function validateConfig(config: unknown): string[] {
@@ -86,6 +86,24 @@ export function validateConfig(config: unknown): string[] {
     }
     if (!Array.isArray(webResearch.allowed_domains) || !webResearch.allowed_domains.every((domain) => typeof domain === "string" && domain.trim())) {
       errors.push("web_research.allowed_domains must be an array of domains");
+    }
+  }
+  const chat = c.chat;
+  if (!isPlainObject(chat)) {
+    errors.push("chat must be an object");
+  } else if (!isPlainObject(chat.interface_model)) {
+    errors.push("chat.interface_model must be an object");
+  } else {
+    if (typeof chat.interface_model.enabled !== "boolean") errors.push("chat.interface_model.enabled must be a boolean");
+    if (typeof chat.interface_model.require_explicit_route !== "boolean") {
+      errors.push("chat.interface_model.require_explicit_route must be a boolean");
+    }
+    if (!isPositiveInteger(chat.interface_model.timeout_seconds)) errors.push("chat.interface_model.timeout_seconds must be a positive integer");
+    if (typeof chat.interface_model.fallback_to_heuristics !== "boolean") {
+      errors.push("chat.interface_model.fallback_to_heuristics must be a boolean");
+    }
+    if (typeof chat.interface_model.minimum_confidence !== "number" || chat.interface_model.minimum_confidence < 0 || chat.interface_model.minimum_confidence > 1) {
+      errors.push("chat.interface_model.minimum_confidence must be between 0 and 1");
     }
   }
   if (!["ollama", "llamacpp"].includes(c.models?.provider_default ?? "")) {

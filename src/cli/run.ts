@@ -5,7 +5,14 @@ import { spawnSync } from "node:child_process";
 import { writeDefaultConfigIfMissing, loadConfig, saveConfig } from "../core/config/config.js";
 import { HARDWARE_PROFILES, detectHostRamGb, isHardwareProfileName } from "../core/hardware/profile.js";
 import { ensureMissionStructure, initializeDatabase, missionDir, queryJson, databasePath } from "../core/storage/sqlite.js";
-import { initializeLedger, loadCompileResult, persistCompileResult, startMission } from "../core/mission/ledger.js";
+import {
+  archiveActiveMission,
+  initializeLedger,
+  loadCompileResult,
+  loadMission,
+  persistCompileResult,
+  startMission,
+} from "../core/mission/ledger.js";
 import { compileSpecInput, detectInputType } from "../core/spec/compiler.js";
 import { createValidator } from "../core/schemas/validator.js";
 import { schemaFixtures } from "../core/schemas/fixtures.js";
@@ -20,6 +27,7 @@ import { exportBenchmarkSkeleton } from "../core/evaluation/benchmark.js";
 import { runLocalBenchmark } from "../core/evaluation/local-benchmark.js";
 import { appendEvent } from "../core/trace/events.js";
 import { validateMissionConsistency } from "../core/evaluation/consistency.js";
+import { normalizeComparableText } from "../core/utils/paths.js";
 import { parsePositiveInteger, valueAfter } from "./args.js";
 import { runChatCommand } from "./chat-command.js";
 import {
@@ -233,7 +241,7 @@ async function cmdDoctor(cwd: string, io: CliIO): Promise<number> {
 
 async function cmdChat(cwd: string, io: CliIO, args: string[]): Promise<number> {
   const loaded = requireValidConfig(cwd);
-  return await runChatCommand(cwd, loaded.config, io, args);
+  return await runChatCommand(cwd, loaded, io, args);
 }
 
 async function cmdWebSearch(cwd: string, io: CliIO, query: string): Promise<number> {
@@ -301,9 +309,23 @@ function startCompiledBuild(cwd: string, io: CliIO, file: string | undefined, la
   const loaded = requireValidConfig(cwd);
   ensureMissionStructure(cwd, loaded.config);
   initializeDatabase(cwd, loaded.config);
+  const compiledFile = file ? path.resolve(cwd, file) : path.join(missionDir(cwd, loaded.config), "spec.json");
   const result = file
-    ? compileSpecInput(fs.readFileSync(path.resolve(cwd, file), "utf8"), file.endsWith(".json") ? "json" : undefined)
+    ? compileSpecInput(fs.readFileSync(compiledFile, "utf8"), file.endsWith(".json") ? "json" : undefined)
     : loadCompileResult(cwd, loaded.config);
+  const activeMission = loadActiveMission(cwd, loaded.config);
+  if (activeMission?.status === "active") {
+    if (shouldReplaceActiveMission(result, activeMission, compiledFile)) {
+      const archived = archiveActiveMission(cwd, loaded.config, "replace_active_build");
+      if (archived) io.stdout(`set_aside_active_build ${archived.mission.mission_id} ${archived.mission.goal}`);
+    } else {
+      io.stdout("build_already_active");
+      io.stdout(`${label}_id ${activeMission.mission_id}`);
+      io.stdout(`current_task_id ${activeMission.current_task_id ?? "none"}`);
+      io.stdout("Next: run `microcoder build step` or `microcoder build run`.");
+      return 0;
+    }
+  }
   const started = startMission(cwd, loaded.config, result);
   if (started.status === "blocked") {
     io.stdout("blocked_by_spec_ambiguity");
@@ -314,6 +336,29 @@ function startCompiledBuild(cwd: string, io: CliIO, file: string | undefined, la
   io.stdout(`status ${started.mission.status}`);
   io.stdout(`current_task_id ${started.mission.current_task_id ?? "none"}`);
   return 0;
+}
+
+function loadActiveMission(cwd: string, config: ReturnType<typeof loadConfig>["config"]): ReturnType<typeof loadMission> | null {
+  try {
+    return loadMission(cwd, config);
+  } catch {
+    return null;
+  }
+}
+
+function shouldReplaceActiveMission(
+  result: ReturnType<typeof loadCompileResult>,
+  mission: ReturnType<typeof loadMission>,
+  compiledFile: string,
+): boolean {
+  if (normalizeComparableText(result.spec.goal) !== normalizeComparableText(mission.goal)) return true;
+  try {
+    const compiledMtime = fs.statSync(compiledFile).mtimeMs;
+    const missionCreatedAt = Date.parse(mission.created_at);
+    return Number.isFinite(compiledMtime) && Number.isFinite(missionCreatedAt) && compiledMtime > missionCreatedAt;
+  } catch {
+    return false;
+  }
 }
 
 function cmdRepoIndex(cwd: string, io: CliIO): number {
@@ -353,7 +398,15 @@ async function cmdRunMission(cwd: string, io: CliIO, args: string[]): Promise<nu
 }
 
 async function cmdRunBuild(cwd: string, io: CliIO, args: string[]): Promise<number> {
-  return await runMissionCommand(cwd, io, args, requireValidConfig, "build");
+  try {
+    return await runMissionCommand(cwd, io, args, requireValidConfig, "build");
+  } catch (error) {
+    if (error instanceof Error && /no active mission found|task graph not found/.test(error.message)) {
+      io.stderr("No build is active. Tell me what to build first, then say `build it`.");
+      return 1;
+    }
+    throw error;
+  }
 }
 
 async function cmdBuild(cwd: string, io: CliIO, subcommand: string | undefined, rest: string[]): Promise<number> {
@@ -632,7 +685,7 @@ const CHAT_LAB_SCENARIOS: ChatLabScenario[] = [
         reject: ["compiled_spec"],
       },
       {
-        input: "build it",
+        input: "/build start",
         expect: ["Starting build from the compiled spec.", "status active"],
         reject: ["I already turned this into a buildable spec."],
       },
@@ -680,13 +733,13 @@ const CHAT_LAB_SCENARIOS: ChatLabScenario[] = [
         expect: ["I have a build plan."],
       },
       {
-        input: "build it",
+        input: "/build start",
         expect: ["status active"],
       },
       {
         input: "make a todo tracker",
-        expect: ["I have a build plan.", "Existing build still active:"],
-        reject: ["Build already active."],
+        expect: ["I have a build plan."],
+        reject: ["Build already active.", "Existing build still active:"],
       },
     ],
   },

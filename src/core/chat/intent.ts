@@ -55,7 +55,8 @@ export type BriefPatch = {
 };
 
 const BUILD_PREFIX = /^(?:(?:let'?s|let us)\s+|i\s+(?:want|need|would like)\s+to\s+)?(build|make|create|implement|add)\b/i;
-const REDIRECT_PREFIX = /^(actually|instead|change (it|this) to|make it)\b/i;
+const REQUEST_PREFIX = /^(i\s+(?:want|need|would like|could use)\s+(?:a|an|the\s+)?|give me\s+(?:a|an|the\s+)?|i'?m looking for\s+(?:a|an|the\s+)?)/i;
+const REDIRECT_PREFIX = /^(?:(?:wait|ok|okay)[,\s]+)?(actually|instead|scratch that|forget that|change (it|this) to|make it|no|nope|nah|wrong)\b/i;
 
 export function analyzeIntent(text: string): IntentAnalysis {
   const trimmed = trimSentence(text);
@@ -81,7 +82,7 @@ export function analyzeIntent(text: string): IntentAnalysis {
   addTag("media", /\b(image|photo|gallery|album)\b/i.test(trimmed));
   addTag("study", /\b(flashcards?|quiz|study)\b/i.test(trimmed));
   addTag("meal_plan", /\b(recipe|meal|grocery|shopping list)\b/i.test(trimmed));
-  addTag("habit_tracker", /\bhabit\s+tracker\b/i.test(trimmed));
+  addTag("habit_tracker", /\bhabit\s+tracker\b/i.test(trimmed) || /\b(track|log|check off)\s+(my\s+)?habits?\b/i.test(trimmed));
   addTag("workout_tracker", /\b(workout|exercise|fitness)\s+tracker\b/i.test(trimmed));
   addTag("inventory_tracker", /\binventory\s+tracker\b/i.test(trimmed));
   addTag("build_pipeline_tracker", /\b(build pipeline|ci|deployment pipeline)\s+tracker\b/i.test(trimmed));
@@ -91,7 +92,7 @@ export function analyzeIntent(text: string): IntentAnalysis {
   const risk_flags = inferRiskFlags(trimmed);
   const unresolved_risks = inferUnresolvedRisks(trimmed);
   const bare_known_request = isBareKnownRequest(trimmed, tags);
-  const explicit_request = BUILD_PREFIX.test(trimmed) || bare_known_request || REDIRECT_PREFIX.test(trimmed);
+  const explicit_request = BUILD_PREFIX.test(trimmed) || bare_known_request || REDIRECT_PREFIX.test(trimmed) || (REQUEST_PREFIX.test(trimmed) && tags.length > 0);
   const canonical_goal = canonicalGoal(trimmed, tags);
   const confidence = scoreIntent(trimmed, tags, slots, explicit_request, bare_known_request);
 
@@ -172,6 +173,7 @@ export function unresolvedRiskQuestions(risks: RiskGate[]): string[] {
 }
 
 function patchGoal(text: string, analysis: IntentAnalysis): string | undefined {
+  if (analysis.redirect_request && analysis.canonical_goal) return analysis.canonical_goal;
   if (analysis.bare_known_request) return analysis.canonical_goal;
   const first = firstSentence(text);
   if (hasMeaningfulSpecificity(first, analysis)) return first;
@@ -369,7 +371,7 @@ function capturePersonas(text: string): string[] {
 function inferRiskFlags(text: string): string[] {
   const flags: string[] = [];
   if (/\b(auth|permission|login|session|oauth)\b/i.test(text)) flags.push("auth");
-  if (/\b(stripe|payment|invoice|billing|money|card|checkout)\b/i.test(text)) flags.push("billing");
+  if (/\b(stripe|payments?|invoice|billing|money|checkout|credit card|debit card|card payments?)\b/i.test(text)) flags.push("billing");
   if (/\b(schema|migration|database|db|sqlite)\b/i.test(text)) flags.push("schema");
   if (/\b(secret|token|password|credential|pii|vault)\b/i.test(text)) flags.push("sensitive_data");
   if (/\b(frontend|ui|screen|page|component|dashboard|form|chat|browser|web)\b/i.test(text)) flags.push("frontend");
@@ -410,6 +412,7 @@ function hasEnrichmentSignal(analysis: IntentAnalysis): boolean {
     || analysis.slots.workflow_requirements.length > 0
     || analysis.slots.data_terms.length > 0
     || analysis.slots.constraints.length > 0
+    || analysis.slots.personas.length > 0
     || analysis.risk_flags.length > 0;
 }
 
@@ -422,7 +425,12 @@ function hasTrackerIntent(text: string): boolean {
 
 function isBareKnownRequest(text: string, tags: IntentTag[]): boolean {
   if (tags.length === 0) return false;
-  return /^(snake|snake game|to-?do list|todo list|task list|notes? app|kanban|kanban board|csv expense tracker|expense tracker|pomodoro|pomodoro timer|calculator|markdown previewer|memory card game|memory matching card game|crm|habit tracker|workout tracker|recipe planner|meal planner|flashcards?|flashcard quiz|inventory tracker|event rsvp|rsvp tracker|image gallery|photo gallery|budget dashboard)$/i.test(text);
+  if (BUILD_PREFIX.test(text) || REQUEST_PREFIX.test(text) || REDIRECT_PREFIX.test(text)) return false;
+  if (/\b(my|our|existing|current|broken|bug|fix|improve|better)\b/i.test(text)) return false;
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length > 5) return false;
+  return tags.includes("game")
+    || /\b(app|tool|system|dashboard|board|tracker|timer|calculator|previewer|crm|gallery|quiz|planner|list|notes?)\b/i.test(text);
 }
 
 function hasMeaningfulSpecificity(goal: string, analysis: IntentAnalysis): boolean {

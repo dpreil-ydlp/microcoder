@@ -83,7 +83,13 @@ export async function freePort(): Promise<number> {
   return port;
 }
 
-export async function startFakeLlamaHttpServer(responseText = "FAKE_LLAMA_OK"): Promise<{ port: number; close: () => Promise<void> }> {
+type FakeLlamaResponse = string | ((requestBody: string) => string);
+
+export async function startFakeLlamaHttpServer(
+  responseText: FakeLlamaResponse = "FAKE_LLAMA_OK",
+  options: { delayMs?: number } = {},
+): Promise<{ port: number; requests: string[]; close: () => Promise<void> }> {
+  const requests: string[] = [];
   const server = http.createServer((request, response) => {
     if (request.url === "/health" || request.url === "/v1/models") {
       response.writeHead(200, { "content-type": "application/json" });
@@ -91,10 +97,18 @@ export async function startFakeLlamaHttpServer(responseText = "FAKE_LLAMA_OK"): 
       return;
     }
     if (request.url === "/v1/chat/completions" && request.method === "POST") {
-      request.resume();
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => {
+        body += chunk;
+      });
       request.on("end", () => {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ choices: [{ message: { content: responseText } }] }));
+        requests.push(body);
+        const content = typeof responseText === "function" ? responseText(body) : responseText;
+        setTimeout(() => {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ choices: [{ message: { content } }] }));
+        }, options.delayMs ?? 0);
       });
       return;
     }
@@ -104,6 +118,7 @@ export async function startFakeLlamaHttpServer(responseText = "FAKE_LLAMA_OK"): 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     port: (server.address() as AddressInfo).port,
+    requests,
     close: () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   };
 }

@@ -11,7 +11,6 @@ npm install
 npm run build
 npm test
 npm link
-ALLOW_MISSING_STAGES=0 bash /Users/davidpreil/.ai/skills/brutal-test-gauntlet/scripts/run_gauntlet.sh
 
 microcoder
 microcoder web --port 4180

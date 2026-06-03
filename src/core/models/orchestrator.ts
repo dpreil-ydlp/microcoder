@@ -73,6 +73,7 @@ export async function generateFromModel(args: {
   role: string;
   packet: PhasePacket;
   mockResponse?: string;
+  timeoutMs?: number;
 }): Promise<GenerateResult> {
   const started = Date.now();
   if (args.mockResponse !== undefined) {
@@ -91,13 +92,14 @@ export async function generateFromModel(args: {
   }
   const provider = effectiveModelProvider(args.config, model);
   const prompt = formatModelPrompt(args.packet);
+  const timeoutMs = args.timeoutMs ?? args.config.models.llamacpp.timeout_seconds * 1000;
   if (provider === "llamacpp") {
     try {
       const lease = await ensureLlamaCppServer({ cwd: args.cwd, config: args.config, role: args.role, model });
       try {
         return await generateOpenAICompatible({ ...model, provider }, args.packet, started, {
           baseUrl: llamaCppBaseUrl(args.config),
-          timeoutMs: args.config.models.llamacpp.timeout_seconds * 1000,
+          timeoutMs,
         });
       } finally {
         if (lease.started_by_microcoder && args.config.models.llamacpp.auto_stop_after_request) {
@@ -107,14 +109,14 @@ export async function generateFromModel(args: {
     } catch (error) {
       if (args.config.models.allow_provider_fallback) {
         const fallback = findOllamaFallback(registry, args.role, model);
-        if (fallback) return generateOllama(fallback, prompt, started, args.config.models.llamacpp.timeout_seconds * 1000, { temperature: 0.1 });
+        if (fallback) return generateOllama(fallback, prompt, started, timeoutMs, { temperature: 0.1 });
       }
       throw error;
     }
   }
   if (["openai-compatible", "vllm"].includes(provider)) {
     return generateOpenAICompatible({ ...model, provider }, args.packet, started, {
-      timeoutMs: args.config.models.llamacpp.timeout_seconds * 1000,
+      timeoutMs,
     });
   }
   if (provider !== "ollama") {
@@ -123,7 +125,7 @@ export async function generateFromModel(args: {
     });
   }
 
-  return generateOllama(model, prompt, started, args.config.models.llamacpp.timeout_seconds * 1000, { temperature: 0.1 });
+  return generateOllama(model, prompt, started, timeoutMs, { temperature: 0.1 });
 }
 
 export async function probeModelProvider(args: {
@@ -248,6 +250,23 @@ function findOllamaFallback(registry: ModelRegistry, role: string, current: Mode
 
 function formatModelPrompt(packet: PhasePacket): string {
   const packetJson = JSON.stringify(packet, null, 2);
+  if (packet.phase === "interface") {
+    if (packet.task_id === "COMPILED_PLAN_CONTROL") {
+      return formatCompiledPlanControlPrompt(packet);
+    }
+    return [
+      "You are Microcoder's local interface analyst.",
+      "Your job is to understand the user's product/build or control intent in the current Microcoder context and return only valid JSON.",
+      "Follow mission_slice.output_contract exactly; do not reuse a generic schema when the contract asks for compiled-plan control intent.",
+      "For product/build requests, do not choose from a fixed app catalog. Infer the concrete product, likely v1 workflows, stored/displayed data, acceptance checks, and constraints from the user's words.",
+      "If a product/build request is too vague, return kind=needs_clarification with clear questions in constraints or acceptance.",
+      "Keep safety fail-closed: flag external services, payments, deployment, auth, credentials, or real secrets when present.",
+      "Return a single JSON object matching the contract in mission_slice.output_contract. No markdown. No prose.",
+      "",
+      "Phase packet:",
+      packetJson,
+    ].join("\n");
+  }
   if (packet.phase !== "code_patch") {
     return `Return only the required Micro Mission Coder phase output.\n\nPhase packet:\n${packetJson}`;
   }
@@ -275,6 +294,26 @@ function formatModelPrompt(packet: PhasePacket): string {
   ].join("\n");
 }
 
+function formatCompiledPlanControlPrompt(packet: PhasePacket): string {
+  const slice = packet.mission_slice as {
+    user_message?: unknown;
+    current_plan?: unknown;
+    active_build?: unknown;
+  };
+  return [
+    "COMPILED_PLAN_CONTROL: classify this Microcoder follow-up. Return only one JSON object.",
+    'Schema: {"kind":"start_current_plan|inspect_plan|change_plan|reset_plan|show_progress|thanks|unknown","confidence":0.0,"reply":"short sentence","reason":"short reason"}',
+    "Use reset_plan when the user wants to start over, reset, discard, cancel, abandon, clear, remove, or delete the current plan or active/paused build.",
+    "Use start_current_plan when the user approves, continues, resumes, or says to go/build/run/proceed with the current plan.",
+    "Use inspect_plan for questions about the plan/spec/scope/requirements/acceptance checks.",
+    "Use show_progress for progress/status/what-next questions.",
+    "Use change_plan only when the user describes a different app/product/workflow.",
+    `User: ${JSON.stringify(slice.user_message ?? "")}`,
+    `Current plan: ${JSON.stringify(slice.current_plan ?? null)}`,
+    `Active build: ${JSON.stringify(slice.active_build ?? null)}`,
+  ].join("\n");
+}
+
 async function generateOpenAICompatible(
   model: ModelProfile,
   packet: PhasePacket,
@@ -296,6 +335,7 @@ async function generateOpenAICompatible(
       body: JSON.stringify({
         model: model.id,
         temperature: 0.1,
+        max_tokens: Math.max(1, packet.budget_tokens),
         messages: [
           { role: "system", content: "You are Micro Mission Coder. Follow the requested output contract exactly." },
           { role: "user", content: formatModelPrompt(packet) },

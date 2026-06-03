@@ -136,7 +136,10 @@ try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "Microcoder PTY Console" }).waitFor();
-  await waitForOutput("Microcoder Build Console");
+  const startup = await waitForOutput("Hey. What do you want to build?");
+  assertNotIncludes(startup.output, "Microcoder Build Console", "startup");
+  assertNotIncludes(startup.output, "Routes", "startup");
+  assertNotIncludes(startup.output, "Commands:", "startup");
 
   await sendBrowserCommand(page, "what can you do?");
   await waitForOutput("Tell me what you want to build in plain English");
@@ -158,7 +161,7 @@ try {
     if (!artifactPaths.includes(required)) throw new Error(`artifact endpoint missed ${required}: ${JSON.stringify(artifactPaths)}`);
   }
 
-  await sendBrowserCommand(page, "build it");
+  await sendBrowserCommand(page, "/build start");
   const buildOutput = await waitForOutput("status active");
   assertIncludes(buildOutput.output, "Starting build from the compiled spec.", "build start");
   assertIncludes(buildOutput.output, "build_id", "build start");

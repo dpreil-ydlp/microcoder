@@ -17,7 +17,7 @@ import type { CompileResult, CompiledSpec, RuntimeTask, TaskGraph } from "../spe
 export type Mission = {
   mission_id: string;
   goal: string;
-  status: "draft" | "active" | "blocked" | "complete" | "failed";
+  status: "draft" | "active" | "blocked" | "complete" | "failed" | "archived";
   created_at: string;
   updated_at: string;
   current_task_id: string | null;
@@ -56,6 +56,11 @@ export function loadCompileResult(cwd: string, config: MmcConfig, file?: string)
   const target = file ? path.resolve(cwd, file) : path.join(missionDir(cwd, config), "spec.json");
   if (!fs.existsSync(target)) throw new Error(`compiled spec not found: ${target}`);
   return JSON.parse(fs.readFileSync(target, "utf8")) as CompileResult;
+}
+
+export function clearLatestCompileResult(cwd: string, config: MmcConfig): void {
+  const latestFile = path.join(missionDir(cwd, config), "spec.json");
+  if (fs.existsSync(latestFile)) fs.rmSync(latestFile);
 }
 
 export function startMission(cwd: string, config: MmcConfig, result: CompileResult): MissionStartResult {
@@ -116,6 +121,83 @@ export function loadMission(cwd: string, config: MmcConfig): Mission {
   const mission = JSON.parse(fs.readFileSync(file, "utf8")) as Mission;
   createValidator().assert("Mission", mission);
   return mission;
+}
+
+export function markMissionComplete(cwd: string, config: MmcConfig): Mission {
+  const mission = loadMission(cwd, config);
+  const now = new Date().toISOString();
+  const completed: Mission = {
+    ...mission,
+    status: "complete",
+    updated_at: now,
+    current_task_id: null,
+  };
+  createValidator().assert("Mission", completed);
+  const root = missionDir(cwd, config);
+  fs.writeFileSync(path.join(root, "mission.json"), `${JSON.stringify(completed, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(root, "current_state.json"),
+    `${JSON.stringify({ active_mission_id: completed.mission_id, status: "complete", current_task_id: null }, null, 2)}\n`,
+    "utf8",
+  );
+  executeStatements(databasePath(cwd, config), [
+    `UPDATE missions SET status = 'complete', updated_at = ${sqlString(now)}, current_task_id = NULL WHERE mission_id = ${sqlString(completed.mission_id)};`,
+  ]);
+  appendEvent(cwd, config, {
+    mission_id: completed.mission_id,
+    event_type: "mission_completed",
+    payload: { completed_task_count: loadTaskGraph(cwd, config).tasks.filter((task) => task.status === "complete").length },
+  });
+  return completed;
+}
+
+export function archiveActiveMission(cwd: string, config: MmcConfig, reason: string): { mission: Mission; archive_dir: string } | null {
+  let mission: Mission;
+  try {
+    mission = loadMission(cwd, config);
+  } catch {
+    return null;
+  }
+  if (mission.status !== "active") return null;
+  const now = new Date().toISOString();
+  const archived: Mission = {
+    ...mission,
+    status: "archived",
+    updated_at: now,
+    current_task_id: null,
+  };
+  createValidator().assert("Mission", archived);
+  const root = missionDir(cwd, config);
+  const archiveDir = path.join(root, "archived_builds", mission.mission_id);
+  fs.mkdirSync(archiveDir, { recursive: true });
+  fs.writeFileSync(path.join(archiveDir, "mission.json"), `${JSON.stringify(archived, null, 2)}\n`, "utf8");
+  for (const file of ["task_graph.json", "current_state.json"]) {
+    const source = path.join(root, file);
+    if (fs.existsSync(source)) fs.copyFileSync(source, path.join(archiveDir, file));
+  }
+  fs.writeFileSync(
+    path.join(archiveDir, "archive.json"),
+    `${JSON.stringify({ archived_at: now, reason, mission_id: mission.mission_id, goal: mission.goal }, null, 2)}\n`,
+    "utf8",
+  );
+  for (const file of ["mission.json", "task_graph.json"]) {
+    const target = path.join(root, file);
+    if (fs.existsSync(target)) fs.rmSync(target);
+  }
+  fs.writeFileSync(
+    path.join(root, "current_state.json"),
+    `${JSON.stringify({ active_mission_id: null, status: "initialized" }, null, 2)}\n`,
+    "utf8",
+  );
+  executeStatements(databasePath(cwd, config), [
+    `UPDATE missions SET status = 'archived', updated_at = ${sqlString(now)}, current_task_id = NULL WHERE mission_id = ${sqlString(mission.mission_id)};`,
+  ]);
+  appendEvent(cwd, config, {
+    mission_id: mission.mission_id,
+    event_type: "mission_archived",
+    payload: { reason, archive_dir: archiveDir },
+  });
+  return { mission: archived, archive_dir: archiveDir };
 }
 
 export function loadTaskGraph(cwd: string, config: MmcConfig): TaskGraph {
